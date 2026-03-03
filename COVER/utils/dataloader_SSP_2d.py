@@ -2,6 +2,7 @@ from os.path import join
 from os import listdir
 import os
 import cv2
+import torch
 from torch.utils import data
 import numpy as np
 import nibabel as nib
@@ -155,6 +156,7 @@ class DatasetFromFolder2D(data.Dataset):
 #     def __len__(self):
 
 #         return len(self.filenames)
+
 
 
 
