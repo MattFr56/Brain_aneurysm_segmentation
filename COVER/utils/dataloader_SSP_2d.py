@@ -94,9 +94,7 @@ class DatasetFromFolder2D(data.Dataset):
 
     def __getitem__(self, index):
         img = np.load(self.filenames[index])
-        mask = np.load(self.filenames[index].replace('.npy'))  # Charge le masque
         img = torch.from_numpy(img).unsqueeze(0)  # Ajoute la dimension channel
-        mask = torch.from_numpy(mask).unsqueeze(0)
         return img  # Retourne aussi le masque
 
     # def __getitem__(self, index):
@@ -157,5 +155,6 @@ class DatasetFromFolder2D(data.Dataset):
 #     def __len__(self):
 
 #         return len(self.filenames)
+
 
 
