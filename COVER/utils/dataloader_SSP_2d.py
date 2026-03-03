@@ -6,7 +6,7 @@ from torch.utils import data
 import numpy as np
 import nibabel as nib
 from monai.transforms import Compose, ScaleIntensityRange, RandAdjustContrast, RandGaussianNoise, Resize
-
+from tqdm import tqdm
 def is_image_file(filename):
         return any(filename.endswith(extension) for extension in [".nii", ".nii.gz"])
 
@@ -21,8 +21,31 @@ def is_image_file(filename):
 #                 out_name = fname.replace('.nii.gz', '').replace('.nii', '') + f'_slice{s:03d}.npy'
 #                 np.save(join(output_dir, out_name), slice_img)
 
+#def preprocess_to_npy(file_dir, output_dir, patch_size=(256, 256)):
+   # os.makedirs(output_dir, exist_ok=True)
+   # transforms = Compose([
+    #    ScaleIntensityRange(a_min=100, a_max=500, b_min=0.0, b_max=1.0, clip=True),
+        #RandAdjustContrast(prob=0.5, gamma=(0.8, 1.2)),
+        #RandGaussianNoise(prob=0.3, std=0.05),
+        #Resize(spatial_size=patch_size),
+    #])
+
+    #for fname in os.listdir(file_dir):
+        #if is_image_file(fname):
+            #vol = nib.load(join(file_dir, fname)).get_fdata()
+            #for s in range(vol.shape[2]):
+                #slice_img = vol[:, :, s]
+                # Prétraitement MONAI
+                #slice_img = transforms(slice_img[np.newaxis, ...])[0]
+        
+                # Sauvegarde
+                #out_name = fname.replace('.nii.gz', '').replace('.nii', '') + f'_slice{s:03d}.npy'
+                #np.save(join(output_dir, out_name), slice_img)
+
 def preprocess_to_npy(file_dir, output_dir, patch_size=(256, 256)):
     os.makedirs(output_dir, exist_ok=True)
+
+    # MONAI transform pipeline
     transforms = Compose([
         ScaleIntensityRange(a_min=100, a_max=500, b_min=0.0, b_max=1.0, clip=True),
         RandAdjustContrast(prob=0.5, gamma=(0.8, 1.2)),
@@ -30,18 +53,27 @@ def preprocess_to_npy(file_dir, output_dir, patch_size=(256, 256)):
         Resize(spatial_size=patch_size),
     ])
 
-    for fname in os.listdir(file_dir):
-        if is_image_file(fname):
-            vol = nib.load(join(file_dir, fname)).get_fdata()
-            for s in range(vol.shape[2]):
-                slice_img = vol[:, :, s]
-                # Prétraitement MONAI
-                slice_img = transforms(slice_img[np.newaxis, ...])[0]
-        
-                # Sauvegarde
-                out_name = fname.replace('.nii.gz', '').replace('.nii', '') + f'_slice{s:03d}.npy'
-                np.save(join(output_dir, out_name), slice_img)
-                
+    files = [f for f in os.listdir(file_dir) if is_image_file(f)]
+    total_slices = sum([nib.load(join(file_dir, f)).shape[2] for f in files])
+
+    print(f"Preprocessing {len(files)} files ({total_slices} slices) from '{file_dir}' to '{output_dir}'\n")
+
+    slice_counter = 0
+    # Loop through files with tqdm for progress
+    for fname in tqdm(files, desc="Processing files"):
+        vol = nib.load(join(file_dir, fname)).get_fdata()
+        for s in range(vol.shape[2]):
+            slice_img = vol[:, :, s]
+            slice_img_dict = {'image': slice_img[np.newaxis, ...]}
+            slice_img_processed = transforms(slice_img_dict)['image'][0]
+
+            out_name = fname.replace('.nii.gz', '').replace('.nii', '') + f'_slice{s:03d}.npy'
+            np.save(join(output_dir, out_name), slice_img_processed)
+
+            slice_counter += 1
+
+    print(f"\n Preprocessing completed: {slice_counter} slices saved to '{output_dir}'")
+
 class DatasetFromFolder2D(data.Dataset):
     def __init__(self, filenames, shape):
         super(DatasetFromFolder2D, self).__init__()
@@ -113,3 +145,4 @@ class DatasetFromFolder2D(data.Dataset):
 #     def __len__(self):
 
 #         return len(self.filenames)
+
