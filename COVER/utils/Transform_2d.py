@@ -17,23 +17,36 @@ class CropTransform(object):
         return code
 
     def augment_crop(self, image, code):
+        # Pure tensor slicing — device-agnostic, no fix needed
         image = image[:, :, code[0]:code[0]+self.crop_shape[0], code[1]:code[1]+self.crop_shape[1]]
         return image
 
+
 class AffineTransformer2D(nn.Module):
-    """
-    2-D Affine Transformer
-    """
+    """2-D Affine Transformer"""
 
     def __init__(self):
         super().__init__()
 
     def forward(self, src, mat, mode='bilinear'):
-        norm = torch.tensor([[1, 1, src.shape[2]], [1, 1, src.shape[3]]], dtype=torch.float).cuda()
-        norm = norm[np.newaxis, :, :]
-        mat_new = mat/norm
-        grid = nnf.affine_grid(mat_new, [src.shape[0], 2, src.shape[2], src.shape[3]])
-        return nnf.grid_sample(src, grid, mode=mode)
+        # FIX 2: use src.device instead of hardcoded .cuda()
+        norm = torch.tensor(
+            [[1, 1, src.shape[2]],
+             [1, 1, src.shape[3]]],
+            dtype=torch.float,
+            device=src.device,   # ✅ follows src device
+        )
+        norm    = norm[np.newaxis, :, :]
+        mat_new = mat / norm
+
+        # FIX 5: align_corners=True in both affine_grid and grid_sample
+        grid = nnf.affine_grid(
+            mat_new,
+            [src.shape[0], 2, src.shape[2], src.shape[3]],
+            align_corners=True,  # ✅
+        )
+        return nnf.grid_sample(src, grid, mode=mode, align_corners=True)  # ✅
+
 
 class SpatialTransformer2D(nn.Module):
     def __init__(self):
@@ -42,23 +55,23 @@ class SpatialTransformer2D(nn.Module):
     def forward(self, src, flow, mode='bilinear', padding_mode='zeros'):
         shape = flow.shape[2:]
         vectors = [torch.arange(0, s) for s in shape]
-        grids = torch.meshgrid(vectors)
-        grid = torch.stack(grids)  # y, x
-        grid = torch.unsqueeze(grid, 0)  # add batch
-        grid = grid.type(torch.FloatTensor)
 
-        if torch.cuda.is_available():
-            grid = grid.cuda()
+        # FIX 4: explicit indexing='ij'
+        grids = torch.meshgrid(vectors, indexing='ij')
+        grid  = torch.stack(grids)           # (2, H, W)
+        grid  = torch.unsqueeze(grid, 0)     # (1, 2, H, W)
+        grid  = grid.type(torch.FloatTensor).to(src.device)  # ✅ follows src device
 
         new_locs = grid + flow
-
         for i in range(len(shape)):
             new_locs[:, i, ...] = 2 * (new_locs[:, i, ...] / (shape[i] - 1) - 0.5)
 
         new_locs = new_locs.permute(0, 2, 3, 1)
         new_locs = new_locs[..., [1, 0]]
 
-        return nnf.grid_sample(src, new_locs, mode=mode, padding_mode=padding_mode)
+        # FIX 3: align_corners=True — matches coordinate normalisation formula above
+        return nnf.grid_sample(src, new_locs, mode=mode,
+                               padding_mode=padding_mode, align_corners=True)  # ✅
 
 
 class SpatialTransform2D(object):
@@ -78,25 +91,24 @@ class SpatialTransform2D(object):
                  alpha=(0., 1000.),
                  sigma=(10., 13.),
                  device='cpu'):
-        self.do_rotation = do_rotation
-        self.angle_x = angle_x
-        self.angle_y = angle_y
-        self.do_scale = do_scale
-        self.scale_x = scale_x
-        self.scale_y = scale_y
-
+        self.do_rotation      = do_rotation
+        self.angle_x          = angle_x
+        self.angle_y          = angle_y
+        self.do_scale         = do_scale
+        self.scale_x          = scale_x
+        self.scale_y          = scale_y
         self.do_elastic_deform = do_elastic_deform
-        self.alpha = alpha
-        self.sigma = sigma
-        self.do_translate = do_translate
-        self.trans_x = trans_x
-        self.trans_y = trans_y
-        self.do_shear = do_shear
-        self.shear_xy = shear_xy
-        self.shear_yx = shear_yx
+        self.alpha            = alpha
+        self.sigma            = sigma
+        self.do_translate     = do_translate
+        self.trans_x          = trans_x
+        self.trans_y          = trans_y
+        self.do_shear         = do_shear
+        self.shear_xy         = shear_xy
+        self.shear_yx         = shear_yx
 
-        self.stn = SpatialTransformer2D()
-        self.atn = AffineTransformer2D()
+        self.stn    = SpatialTransformer2D()
+        self.atn    = AffineTransformer2D()
         self.device = device
 
     def augment_spatial(self, data, code, mode='bilinear'):
@@ -106,6 +118,7 @@ class SpatialTransform2D(object):
     def rand_coords(self, patch_size):
         coords = self.create_zero_centered_coordinate_mesh(patch_size)
         mat = np.identity(len(coords))
+
         if self.do_rotation:
             a_x = np.random.uniform(self.angle_x[0], self.angle_x[1])
             a_y = np.random.uniform(self.angle_y[0], self.angle_y[1])
@@ -128,8 +141,13 @@ class SpatialTransform2D(object):
         else:
             mat = self.translate_mat(mat, 0, 0)
 
-        affine_coords = np.dot(coords.reshape(len(coords), -1).transpose(), mat[:, :-1]).transpose().reshape(
-            coords.shape) + mat[:, -1, np.newaxis, np.newaxis]
+        affine_coords = (
+            np.dot(coords.reshape(len(coords), -1).transpose(), mat[:, :-1])
+            .transpose()
+            .reshape(coords.shape)
+            + mat[:, -1, np.newaxis, np.newaxis]
+        )
+
         if self.do_elastic_deform:
             a = np.random.uniform(self.alpha[0], self.alpha[1])
             s = np.random.uniform(self.sigma[0], self.sigma[1])
@@ -137,83 +155,83 @@ class SpatialTransform2D(object):
         else:
             coords = affine_coords
 
-        ctr = np.asarray([patch_size[0] // 2, patch_size[1] // 2])
+        ctr  = np.asarray([patch_size[0] // 2, patch_size[1] // 2])
         grid = np.where(np.ones(patch_size) == 1)
-        grid = np.concatenate([grid[0].reshape((1,) + patch_size), grid[1].reshape((1,) + patch_size)], axis=0)
-        grid = grid.astype(np.float32)
+        grid = np.concatenate(
+            [grid[0].reshape((1,) + patch_size), grid[1].reshape((1,) + patch_size)], axis=0
+        ).astype(np.float32)
 
         coords += ctr[:, np.newaxis, np.newaxis] - grid
-        coords = coords.astype(np.float32)
-        coords = torch.from_numpy(coords[np.newaxis, :, :, :]).to(device=self.device)
-        mat = torch.from_numpy(mat[np.newaxis].astype(np.float32)).to(device=self.device)
+        coords  = coords.astype(np.float32)
+        coords  = torch.from_numpy(coords[np.newaxis]).to(device=self.device)
+        mat     = torch.from_numpy(mat[np.newaxis].astype(np.float32)).to(device=self.device)
         return coords, mat
 
     def create_zero_centered_coordinate_mesh(self, shape):
-        tmp = tuple([np.arange(i) for i in shape])
+        tmp    = tuple([np.arange(i) for i in shape])
         coords = np.array(np.meshgrid(*tmp, indexing='ij')).astype(float)
         for d in range(len(shape)):
             coords[d] -= ((np.array(shape).astype(float) - 1) / 2.)[d]
         return coords
 
     def rotate_mat(self, mat, angle_x, angle_y):
-        rot_mat_x = np.stack(
-            [np.stack([np.cos(angle_x), -np.sin(angle_x)], axis=0),
-             np.stack([np.sin(angle_x), np.cos(angle_x)], axis=0)], axis=1)
-        rot_mat_y = np.stack(
-            [np.stack([np.cos(angle_y), np.sin(angle_y)], axis=0),
-             np.stack([-np.sin(angle_y), np.cos(angle_y)], axis=0)], axis=1)
-        mat = np.matmul(rot_mat_y, np.matmul(rot_mat_x, mat))
-        return mat
+        rot_mat_x = np.stack([
+            np.stack([np.cos(angle_x), -np.sin(angle_x)], axis=0),
+            np.stack([np.sin(angle_x),  np.cos(angle_x)], axis=0),
+        ], axis=1)
+        rot_mat_y = np.stack([
+            np.stack([ np.cos(angle_y), np.sin(angle_y)], axis=0),
+            np.stack([-np.sin(angle_y), np.cos(angle_y)], axis=0),
+        ], axis=1)
+        return np.matmul(rot_mat_y, np.matmul(rot_mat_x, mat))
 
     def deform_coords(self, coords, alpha, sigma):
-        n_dim = len(coords)
+        n_dim   = len(coords)
         offsets = []
         for _ in range(n_dim):
             offsets.append(
-                gaussian_filter((np.random.random(coords.shape[1:]) * 2 - 1), sigma, mode="constant",
-                                cval=0) * alpha)
-        offsets = np.array(offsets)
-        indices = offsets + coords
-        return indices
+                gaussian_filter(
+                    (np.random.random(coords.shape[1:]) * 2 - 1),
+                    sigma, mode="constant", cval=0,
+                ) * alpha
+            )
+        return np.array(offsets) + coords
 
     def scale_mat(self, mat, scale_x, scale_y):
-        scale_mat = np.stack(
-            [np.stack([scale_x, 0], axis=0),
-             np.stack([0, scale_y], axis=0)], axis=1)
-        mat = np.matmul(scale_mat, mat)
-        return mat
+        scale_mat = np.stack([
+            np.stack([scale_x, 0      ], axis=0),
+            np.stack([0,       scale_y], axis=0),
+        ], axis=1)
+        return np.matmul(scale_mat, mat)
 
     def shear_mat(self, mat, shear_xy, shear_yx):
-        shear_mat = np.stack(
-            [np.stack([1, np.tan(shear_xy)], axis=0),
-             np.stack([np.tan(shear_yx), 1], axis=0)], axis=1)
-        mat = np.matmul(shear_mat, mat)
-        return mat
+        shear_mat = np.stack([
+            np.stack([1,               np.tan(shear_xy)], axis=0),
+            np.stack([np.tan(shear_yx), 1              ], axis=0),
+        ], axis=1)
+        return np.matmul(shear_mat, mat)
 
     def translate_mat(self, mat, trans_x, trans_y):
-        trans = np.stack([trans_x, trans_y], axis=0)
-        trans = trans[:, np.newaxis]
-        mat = np.concatenate([mat, trans], axis=-1)
-        return mat
+        trans = np.stack([trans_x, trans_y], axis=0)[:, np.newaxis]
+        return np.concatenate([mat, trans], axis=-1)
 
 
 class AppearanceTransform(object):
-    def __init__(self, do_noise=True, noise_variance=(0, 0.02), do_blur=True, sigma_range=(0, 0.05), do_contrast=True,
-                 contrast_range=(0.5, 1.5), do_brightness=True, mu=0., sigma=0.1, do_inpaint=True):
-
-        self.do_noise = do_noise
+    def __init__(self, do_noise=True, noise_variance=(0, 0.02),
+                 do_blur=True, sigma_range=(0, 0.05),
+                 do_contrast=True, contrast_range=(0.5, 1.5),
+                 do_brightness=True, mu=0., sigma=0.1,
+                 do_inpaint=True):
+        self.do_noise       = do_noise
         self.noise_variance = noise_variance
-
-        self.do_blur = do_blur
-        self.sigma_range = sigma_range
-
-        self.do_inpaint = do_inpaint
-        self.do_contrast = do_contrast
+        self.do_blur        = do_blur
+        self.sigma_range    = sigma_range
+        self.do_inpaint     = do_inpaint
+        self.do_contrast    = do_contrast
         self.contrast_range = contrast_range
-
-        self.do_brightness = do_brightness
-        self.mu = mu
-        self.sigma = sigma
+        self.do_brightness  = do_brightness
+        self.mu             = mu
+        self.sigma          = sigma
 
     def rand_aug(self, data):
         if self.do_noise:
@@ -242,33 +260,36 @@ class AppearanceTransform(object):
         for i in range(B):
             cnt = 10
             while cnt > 0 and np.random.random() < 0.95:
-                block_noise_size_x = np.random.randint(3*img_rows // 30, 4*img_rows // 30)
-                block_noise_size_y = np.random.randint(3*img_cols // 30, 4*img_cols // 30)
+                block_noise_size_x = np.random.randint(3 * img_rows // 30, 4 * img_rows // 30)
+                block_noise_size_y = np.random.randint(3 * img_cols // 30, 4 * img_cols // 30)
                 noise_x = np.random.randint(3, img_rows - block_noise_size_x - 3)
                 noise_y = np.random.randint(3, img_cols - block_noise_size_y - 3)
                 x[i, :,
-                noise_x:noise_x + block_noise_size_x,
-                noise_y:noise_y + block_noise_size_y] = torch.rand(block_noise_size_x, block_noise_size_y,).to(x.device) * 1.0
+                  noise_x:noise_x + block_noise_size_x,
+                  noise_y:noise_y + block_noise_size_y] = (
+                    torch.rand(block_noise_size_x, block_noise_size_y).to(x.device) * 1.0
+                )
                 cnt -= 1
         return x
 
     def augment_gaussian_noise(self, data, variance=0.05):
-        data = data + torch.from_numpy(np.random.normal(0.0, variance, size=data.shape).astype(np.float32)).to(data.device)
-        return data
+        noise = torch.from_numpy(
+            np.random.normal(0.0, variance, size=data.shape).astype(np.float32)
+        ).to(data.device)
+        return data + noise
 
     def augment_gaussian_blur(self, data, sigma):
-        data = data.data.cpu().numpy()
-        data = gaussian_filter(data, sigma, order=0)
-        data = torch.from_numpy(data).to(data.device)
-        return data
+        # FIX 1: save device BEFORE moving to CPU — restore afterwards
+        device     = data.device                          # ✅ save device first
+        data_np    = data.cpu().numpy()                   # CPU numpy for scipy
+        data_np    = gaussian_filter(data_np, sigma, order=0)
+        return torch.from_numpy(data_np).to(device)      # ✅ restore correct device
 
     def augment_contrast(self, data, factor):
-        mn = data.mean()
+        mn   = data.mean()
         data = (data - mn) * factor + mn
         return data
 
     def augment_brightness_additive(self, data, rnd_nb):
-
         data += rnd_nb
-
         return data
