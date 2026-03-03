@@ -3,6 +3,7 @@ import csv
 import math
 import os
 import shutil
+import glob
 import time
 
 import nibabel as nib
@@ -22,6 +23,7 @@ from utils.Transform_2d import SpatialTransform2D, CropTransform, AppearanceTran
 from utils.dataloader_SSP_2d import DatasetFromFolder2D, preprocess_to_npy
 from utils.losses import partical_MAE, partical_COS
 import numpy as np
+from tqdm import tqdm
 
 parser = argparse.ArgumentParser(description="COVER 2D SSL Pretraining")
 parser.add_argument("-modelname", metavar="NAME", default="COVER_2D_brain_vessels",
@@ -52,7 +54,7 @@ parser.add_argument("--n_channels", default=1, type=int,
                     help="number of input channels")
 parser.add_argument("--amp", default=2, type=int,
                     help="amplification of the kernel (default: 2)")
-parser.add_argument("--degree", default=1.5, type=float,
+parser.add_argument("--degree", default=0.5, type=float,
                     help="spatial transformation degree (default: 1.5)")
 
 
@@ -224,16 +226,13 @@ def train(train_loader, model, criterion_vec, criterion_con, optimizer, epoch, a
     train_data_time  = AverageMeter("Train Data time",  ":6.3f")
     train_losses_vec = AverageMeter("Train Loss_vec",   ":.4f")
     train_losses_con = AverageMeter("Train Loss_con",   ":.4f")
-    progress = ProgressMeter(
-        len(train_loader),
-        [train_batch_time, train_data_time, train_losses_vec, train_losses_con],
-        prefix="Epoch: [{}]".format(epoch),
-    )
 
     model.train()
     end = time.time()
 
-    for idx, (img) in enumerate(train_loader):
+    pbar = tqdm(train_loader, desc=f"Train Epoch {epoch+1}", leave=False,
+                unit="batch", dynamic_ncols=True)
+    for idx, (img) in enumerate(pbar):
         train_data_time.update(time.time() - end)
 
         if args.gpu is not None:
@@ -259,6 +258,12 @@ def train(train_loader, model, criterion_vec, criterion_con, optimizer, epoch, a
         im_F      = crop_aug.augment_crop(im_F, crop_code)
         flow_gt   = crop_aug.augment_crop(flow_gt, crop_code)
 
+        # crop_aug / app_aug may return CPU tensors — re-send to GPU
+        device  = torch.device('cuda:{}'.format(args.gpu))
+        im_M    = im_M.to(device)
+        im_F    = im_F.to(device)
+        flow_gt = flow_gt.to(device)
+
         # Forward pass
         flow_pred, f_M, f_F = model(M=im_M, F=im_F)
 
@@ -283,10 +288,10 @@ def train(train_loader, model, criterion_vec, criterion_con, optimizer, epoch, a
         train_batch_time.update(time.time() - end)
         end = time.time()
 
-        if idx % args.print_freq == 0:
-            progress.display(idx)
+        # Update tqdm postfix with running averages
+        pbar.set_postfix(loss_vec=f"{train_losses_vec.avg:.4f}",
+                         loss_con=f"{train_losses_con.avg:.4f}")
 
-    print(f" * Train Loss_vec {train_losses_vec.avg:.4f}  Train Loss_con {train_losses_con.avg:.4f}")
     return train_batch_time.avg, train_data_time.avg, train_losses_vec.avg, train_losses_con.avg
 
 
@@ -298,17 +303,14 @@ def validate(val_loader, model, criterion_vec, criterion_con, epoch, args,
     val_data_time  = AverageMeter("Val Data time",  ":6.3f")
     val_losses_vec = AverageMeter("Val Loss_vec",   ":.4f")
     val_losses_con = AverageMeter("Val Loss_con",   ":.4f")
-    progress = ProgressMeter(
-        len(val_loader),
-        [val_batch_time, val_data_time, val_losses_vec, val_losses_con],
-        prefix="Val:   [{}]".format(epoch),
-    )
 
     model.eval()
     end = time.time()
 
+    pbar = tqdm(val_loader, desc=f"Val   Epoch {epoch+1}", leave=False,
+                unit="batch", dynamic_ncols=True)
     with torch.no_grad():
-        for idx, (img) in enumerate(val_loader):
+        for idx, (img) in enumerate(pbar):
             val_data_time.update(time.time() - end)
 
             if args.gpu is not None:
@@ -331,6 +333,12 @@ def validate(val_loader, model, criterion_vec, criterion_con, epoch, args,
             im_F      = crop_aug.augment_crop(im_F, crop_code)
             flow_gt   = crop_aug.augment_crop(flow_gt, crop_code)
 
+            # crop_aug / app_aug may return CPU tensors — re-send to GPU
+            device  = torch.device('cuda:{}'.format(args.gpu))
+            im_M    = im_M.to(device)
+            im_F    = im_F.to(device)
+            flow_gt = flow_gt.to(device)
+
             flow_pred, f_M, f_F = model(M=im_M, F=im_F)
 
             mask     = build_mask(flow_gt)
@@ -345,10 +353,10 @@ def validate(val_loader, model, criterion_vec, criterion_con, epoch, args,
             val_batch_time.update(time.time() - end)
             end = time.time()
 
-            if idx % args.print_freq == 0:
-                progress.display(idx)
+            # Update tqdm postfix with running averages
+            pbar.set_postfix(loss_vec=f"{val_losses_vec.avg:.4f}",
+                             loss_con=f"{val_losses_con.avg:.4f}")
 
-    print(f" * Val Loss_vec {val_losses_vec.avg:.4f}  Val Loss_con {val_losses_con.avg:.4f}")
     return val_batch_time.avg, val_data_time.avg, val_losses_vec.avg, val_losses_con.avg
 
 
@@ -372,12 +380,29 @@ def build_mask(flow_gt):
     return mask
 
 
-def save_checkpoint(state, is_best, filename, save_dir):
+def save_checkpoint(state, is_best, filename, save_dir, keep_last=3):
+    """
+    Save checkpoint every epoch.
+    When a new best is found:
+      - copy it to model_best.pth.tar
+      - delete all old epoch checkpoints except the last `keep_last`
+        so Drive doesn't fill up
+    """
     torch.save(state, filename)
+
     if is_best:
-        best_path = os.path.join(save_dir, "model_best.pth.tar")  # FIX 7
+        best_path = os.path.join(save_dir, "model_best.pth.tar")
         shutil.copyfile(filename, best_path)
-        print(f"  => Best model saved to {best_path}")
+        print(f"  => New best model saved (val_loss improved) → {best_path}")
+
+        # Remove old checkpoints — keep only the most recent `keep_last`
+        all_ckpts = sorted(
+            glob.glob(os.path.join(save_dir, "checkpoint_*.pth.tar"))
+        )  # sorted alphabetically = chronologically given _XXXX epoch format
+        to_delete = all_ckpts[:-keep_last]
+        for old_ckpt in to_delete:
+            os.remove(old_ckpt)
+            print(f"  => Removed old checkpoint: {os.path.basename(old_ckpt)}")
 
 
 def adjust_learning_rate(optimizer, init_lr, epoch, args):
@@ -414,21 +439,7 @@ class AverageMeter:
         return fmtstr.format(**self.__dict__)
 
 
-class ProgressMeter:
-    def __init__(self, num_batches, meters, prefix=""):
-        self.batch_fmtstr = self._get_batch_fmtstr(num_batches)
-        self.meters       = meters
-        self.prefix       = prefix
-
-    def display(self, batch):
-        entries  = [self.prefix + self.batch_fmtstr.format(batch)]
-        entries += [str(meter) for meter in self.meters]
-        print("\t".join(entries))
-
-    def _get_batch_fmtstr(self, num_batches):
-        num_digits = len(str(num_batches))
-        fmt = "{:" + str(num_digits) + "d}"
-        return "[" + fmt + "/" + fmt.format(num_batches) + "]"
+# ProgressMeter removed — replaced by tqdm
 
 
 class LogWriter:
