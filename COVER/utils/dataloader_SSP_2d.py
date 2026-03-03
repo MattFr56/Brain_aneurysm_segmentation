@@ -50,7 +50,7 @@ from os.path import join
 from monai.transforms import Compose, ScaleIntensityRanged, RandAdjustContrast, RandGaussianNoise, Resize
 from tqdm import tqdm  # progress bar
 
-def preprocess_to_npy(file_dir, output_dir, patch_size=(256, 256)):
+def preprocess_to_npy(file_dir, output_dir, patch_size=(512, 512)):
     os.makedirs(output_dir, exist_ok=True)
 
     # MONAI transforms for plain arrays
@@ -156,6 +156,7 @@ class DatasetFromFolder2D(data.Dataset):
 #     def __len__(self):
 
 #         return len(self.filenames)
+
 
 
 
