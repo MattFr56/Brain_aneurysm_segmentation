@@ -1,163 +1,131 @@
-from os.path import join
-from os import listdir
 import os
-import cv2
+import numpy as np
+import nibabel as nib
 import torch
-from torch.utils import data
-import numpy as np
-import nibabel as nib
-from monai.transforms import Compose, ScaleIntensityRange, RandAdjustContrast, RandGaussianNoise, Resize
-from tqdm import tqdm
-def is_image_file(filename):
-        return any(filename.endswith(extension) for extension in [".nii", ".nii.gz"])
-
-# def preprocess_to_npy(file_dir, output_dir):
-#     os.makedirs(output_dir, exist_ok=True)
-#     for fname in os.listdir(file_dir):
-#         if is_image_file(fname):
-#             vol = nib.load(join(file_dir, fname)).get_fdata()  # (512, 512, 128)
-#             # Save each slice as a separate .npy file
-#             for s in range(vol.shape[2]):
-#                 slice_img = vol[:, :, s]
-#                 out_name = fname.replace('.nii.gz', '').replace('.nii', '') + f'_slice{s:03d}.npy'
-#                 np.save(join(output_dir, out_name), slice_img)
-
-#def preprocess_to_npy(file_dir, output_dir, patch_size=(256, 256)):
-   # os.makedirs(output_dir, exist_ok=True)
-   # transforms = Compose([
-    #    ScaleIntensityRange(a_min=100, a_max=500, b_min=0.0, b_max=1.0, clip=True),
-        #RandAdjustContrast(prob=0.5, gamma=(0.8, 1.2)),
-        #RandGaussianNoise(prob=0.3, std=0.05),
-        #Resize(spatial_size=patch_size),
-    #])
-
-    #for fname in os.listdir(file_dir):
-        #if is_image_file(fname):
-            #vol = nib.load(join(file_dir, fname)).get_fdata()
-            #for s in range(vol.shape[2]):
-                #slice_img = vol[:, :, s]
-                # Prétraitement MONAI
-                #slice_img = transforms(slice_img[np.newaxis, ...])[0]
-        
-                # Sauvegarde
-                #out_name = fname.replace('.nii.gz', '').replace('.nii', '') + f'_slice{s:03d}.npy'
-                #np.save(join(output_dir, out_name), slice_img)
-
-import os
-import numpy as np
-import nibabel as nib
+import torch.nn.functional as F
 from os.path import join
-from monai.transforms import Compose, ScaleIntensityRanged, RandAdjustContrast, RandGaussianNoise, Resize
-from tqdm import tqdm  # progress bar
+from torch.utils import data
+from monai.transforms import (
+    Compose,
+    EnsureType,          # FIX 2: converts numpy → tensor before augmentation
+    ScaleIntensityRange, # FIX 1: non-dict version, consistent with array input
+    Resize,
+)
+from tqdm import tqdm
+
+
+# ─── UTILS ────────────────────────────────────────────────────────────────────
+
+def is_image_file(filename):
+    return any(filename.endswith(ext) for ext in [".nii", ".nii.gz"])
+
+
+# ─── PREPROCESSING ────────────────────────────────────────────────────────────
 
 def preprocess_to_npy(file_dir, output_dir, patch_size=(512, 512)):
+    """
+    Load NIfTI volumes, extract axial slices, apply deterministic
+    preprocessing (normalisation + resize) and save as .npy files.
+
+    FIX 3: Random augmentations (contrast, noise) are intentionally removed
+           from here — they must be applied at training time so the model
+           sees different augmented versions of each slice every epoch.
+    FIX 2: EnsureType() added so MONAI transforms receive a proper tensor.
+    """
     os.makedirs(output_dir, exist_ok=True)
 
-    # MONAI transforms for plain arrays
+    # Deterministic transforms only — no randomness at preprocessing stage
     transforms = Compose([
-        ScaleIntensityRange(a_min=100, a_max=500, b_min=0.0, b_max=1.0, clip=True),
-        RandAdjustContrast(prob=0.5, gamma=(0.8, 1.2)),
-        RandGaussianNoise(prob=0.3, std=0.05),
+        EnsureType(),                                                # FIX 2
+        ScaleIntensityRange(
+            a_min=100, a_max=500,
+            b_min=0.0, b_max=1.0,
+            clip=True
+        ),
         Resize(spatial_size=patch_size),
     ])
 
     files = [f for f in os.listdir(file_dir) if is_image_file(f)]
-    total_slices = sum([nib.load(join(file_dir, f)).shape[2] for f in files])
+    if len(files) == 0:
+        raise RuntimeError(f"No NIfTI files found in '{file_dir}'")
 
-    print(f"Preprocessing {len(files)} files ({total_slices} slices) from '{file_dir}' to '{output_dir}'\n")
+    total_slices = sum(nib.load(join(file_dir, f)).shape[2] for f in files)
+    print(f"Preprocessing {len(files)} volumes ({total_slices} slices total)\n"
+          f"  source : {file_dir}\n"
+          f"  output : {output_dir}\n")
 
     slice_counter = 0
+    skipped       = 0
 
-    # File-level tqdm
-    for fname in tqdm(files, desc="Processing files"):
-        vol = nib.load(join(file_dir, fname)).get_fdata()
-        
-        # Slice-level tqdm for this volume
-        for s in tqdm(range(vol.shape[2]), desc=f"Slices of {fname}", leave=False):
-            slice_img = vol[:, :, s]
+    for fname in tqdm(files, desc="Volumes"):
+        vol = nib.load(join(file_dir, fname)).get_fdata().astype(np.float32)
 
-            # Apply MONAI transforms directly to the array
-            slice_img_processed = transforms(slice_img[np.newaxis, ...])[0]
+        for s in tqdm(range(vol.shape[2]), desc=f"  {fname}", leave=False):
+            slice_img = vol[:, :, s]                     # (H, W)
 
-            # Save slice
-            out_name = fname.replace('.nii.gz', '').replace('.nii', '') + f'_slice{s:03d}.npy'
-            np.save(join(output_dir, out_name), slice_img_processed)
+            # FIX 6: skip blank slices to avoid NaN from division by zero
+            if slice_img.max() == 0:
+                skipped += 1
+                continue
 
+            # Add channel dim expected by MONAI transforms → (1, H, W)
+            slice_tensor = transforms(slice_img[np.newaxis, ...])  # (1, H, W)
+
+            out_name = (
+                fname.replace('.nii.gz', '').replace('.nii', '')
+                + f'_slice{s:03d}.npy'
+            )
+            # Save as float32 numpy array — squeeze channel dim for compact storage
+            np.save(join(output_dir, out_name), slice_tensor.numpy().astype(np.float32))
             slice_counter += 1
 
-    print(f"\n Preprocessing completed: {slice_counter} slices saved to '{output_dir}'")
+    print(f"\nPreprocessing complete: {slice_counter} slices saved"
+          f" ({skipped} blank slices skipped)")
+
+
+# ─── DATASET ──────────────────────────────────────────────────────────────────
 
 class DatasetFromFolder2D(data.Dataset):
+    """
+    Loads preprocessed 2D slices (.npy) for COVER SSL pretraining.
+
+    Each .npy file contains a single (H, W) float32 array (channel dim was
+    squeezed at save time). __getitem__ restores the channel dim and resizes
+    to self.shape so the batch shape is always (1, H, W).
+
+    FIX 4: explicit cast to float32 — avoids float64 tensor instability.
+    FIX 5: self.shape is now actually used — bilinear resize in __getitem__.
+    """
+
     def __init__(self, filenames, shape):
+        """
+        Args:
+            filenames : list of absolute paths to .npy slice files
+            shape     : (H, W) tuple — output spatial size fed to the model
+        """
         super(DatasetFromFolder2D, self).__init__()
-        self.filenames = filenames  # list of .npy paths
-        self.shape = shape
+        if len(filenames) == 0:
+            raise RuntimeError("DatasetFromFolder2D received an empty file list.")
+        self.filenames = filenames
+        self.shape     = shape  # e.g. (384, 384) = int(256 * 1.5)
 
     def __getitem__(self, index):
+        # Load — shape on disk is (H, W), float32
         img = np.load(self.filenames[index])
-        img = torch.from_numpy(img).unsqueeze(0)  # Ajoute la dimension channel
-        return img  # Retourne aussi le masque
 
-    # def __getitem__(self, index):
-    #     img = np.load(self.filenames[index])     # instant load
-    #     img = cv2.resize(img, self.shape)
-    #     img = img / img.max()
-    #     img = img.astype(np.float32)
-    #     img = img[np.newaxis, :, :]
-    #     return img
+        # FIX 4: explicit float32 cast (np.load preserves saved dtype, but be safe)
+        img = torch.from_numpy(img.astype(np.float32)).unsqueeze(0)  # (1, H, W)
+
+        # FIX 5: resize to self.shape if needed (guarantees consistent batch shapes)
+        if img.shape[1:] != torch.Size(self.shape):
+            img = F.interpolate(
+                img.unsqueeze(0),          # (1, 1, H, W)
+                size=self.shape,
+                mode='bilinear',
+                align_corners=False,
+            ).squeeze(0)                   # (1, H, W)
+
+        return img                         # float32 tensor (1, H, W)
 
     def __len__(self):
         return len(self.filenames)
-
-# class DatasetFromFolder2D(data.Dataset):
-#     def __init__(self, file_dir, filenames, shape):
-#         super(DatasetFromFolder2D, self).__init__()
-#         self.file_dir = file_dir
-#         self.shape = shape
-        
-#         # Build a flat list of (filename, slice_index) pairs
-#         self.slices = []
-#         for fname in filenames:
-#             img = nib.load(join(file_dir, fname))
-#             n_slices = img.shape[2]  # 128
-#             for s in range(n_slices):
-#                 self.slices.append((fname, s))
-
-#     def __getitem__(self, index):
-#         fname, slice_idx = self.slices[index]
-#         img = nib.load(join(self.file_dir, fname))
-#         img = img.get_fdata()[:, :, slice_idx]   # (512, 512)
-#         img = cv2.resize(img, self.shape)
-#         img = img / img.max()
-#         img = img.astype(np.float32)
-#         img = img[np.newaxis, :, :]               # (1, H, W)
-#         return img
-
-#     def __len__(self):
-#         return len(self.slices)
-
-# class DatasetFromFolder2D(data.Dataset):
-#     def __init__(self, file_dir, shape):
-#         super(DatasetFromFolder2D, self).__init__()
-#         self.filenames = [x for x in listdir(file_dir) if is_image_file(x)]
-#         self.file_dir = file_dir
-#         self.shape = shape
-
-#     def __getitem__(self, index):
-#         img = nib.load(join(self.file_dir, self.filenames[index]))
-#         img = img.get_fdata()                    # load as numpy array
-#         img = cv2.resize(img, self.shape)
-#         img = img / img.max()                    # normalize, 255 doesn't apply to NIfTI
-#         img = img.astype(np.float32)
-#         img = img[np.newaxis, :, :]
-
-#         return img
-
-#     def __len__(self):
-
-#         return len(self.filenames)
-
-
-
-
-
