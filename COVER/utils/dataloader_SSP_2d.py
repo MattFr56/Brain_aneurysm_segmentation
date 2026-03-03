@@ -110,20 +110,29 @@ class DatasetFromFolder2D(data.Dataset):
         self.shape     = shape  # e.g. (384, 384) = int(256 * 1.5)
 
     def __getitem__(self, index):
-        # Load — shape on disk is (H, W), float32
+        # Load — shape on disk is either (H, W) or (1, H, W) depending on how
+        # preprocess_to_npy saved it. Normalise to (1, H, W) either way.
         img = np.load(self.filenames[index])
 
-        # FIX 4: explicit float32 cast (np.load preserves saved dtype, but be safe)
-        img = torch.from_numpy(img.astype(np.float32)).unsqueeze(0)  # (1, H, W)
+        # FIX 4: explicit float32 cast
+        img = img.astype(np.float32)
 
-        # FIX 5: resize to self.shape if needed (guarantees consistent batch shapes)
-        if img.shape[1:] != torch.Size(self.shape):
+        # Normalise to (1, H, W) regardless of saved shape
+        if img.ndim == 2:
+            img = torch.from_numpy(img).unsqueeze(0)   # (H, W)   → (1, H, W)
+        elif img.ndim == 3:
+            img = torch.from_numpy(img)                # (1, H, W) already fine
+        else:
+            raise ValueError(f"Unexpected array shape {img.shape} in {self.filenames[index]}")
+
+        # FIX 5: resize to self.shape if spatial dims don't match
+        if tuple(img.shape[1:]) != tuple(self.shape):
             img = F.interpolate(
-                img.unsqueeze(0),          # (1, 1, H, W)
-                size=self.shape,
+                img.unsqueeze(0),          # (1, 1, H, W) — N, C, H, W
+                size=tuple(self.shape),
                 mode='bilinear',
                 align_corners=False,
-            ).squeeze(0)                   # (1, H, W)
+            ).squeeze(0)                   # back to (1, H, W)
 
         return img                         # float32 tensor (1, H, W)
 
