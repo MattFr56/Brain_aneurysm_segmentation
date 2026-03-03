@@ -240,7 +240,9 @@ def train(train_loader, model, criterion_vec, criterion_con, optimizer, epoch, a
             img = img.cuda(args.gpu, non_blocking=True)
 
         # FIX 5: apply MONAI transforms per sample (expects (C,H,W), not (B,C,H,W))
-        im_aug = torch.stack([monai_aug(img[i]) for i in range(img.shape[0])])
+        # MONAI moves tensors to CPU internally — explicit .cpu() then re-send to GPU
+        im_aug = torch.stack([monai_aug(img[i].cpu()) for i in range(img.shape[0])])
+        im_aug = im_aug.cuda(args.gpu, non_blocking=True)  # ✅ back to GPU
 
         # Spatial transformation → deformed image + ground-truth flow
         flow_gt = []
@@ -312,8 +314,9 @@ def validate(val_loader, model, criterion_vec, criterion_con, epoch, args,
             if args.gpu is not None:
                 img = img.cuda(args.gpu, non_blocking=True)
 
-            # FIX 5: per-sample MONAI augmentation
-            im_aug = torch.stack([monai_aug(img[i]) for i in range(img.shape[0])])
+            # FIX 5: per-sample MONAI augmentation — explicit .cpu() then back to GPU
+            im_aug = torch.stack([monai_aug(img[i].cpu()) for i in range(img.shape[0])])
+            im_aug = im_aug.cuda(args.gpu, non_blocking=True)  # ✅ back to GPU
 
             flow_gt = []
             for j in range(im_aug.shape[0]):
