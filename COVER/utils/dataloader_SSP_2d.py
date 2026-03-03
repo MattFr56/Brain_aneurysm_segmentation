@@ -42,10 +42,17 @@ def is_image_file(filename):
                 #out_name = fname.replace('.nii.gz', '').replace('.nii', '') + f'_slice{s:03d}.npy'
                 #np.save(join(output_dir, out_name), slice_img)
 
+import os
+import numpy as np
+import nibabel as nib
+from os.path import join
+from monai.transforms import Compose, ScaleIntensityRanged, RandAdjustContrast, RandGaussianNoise, Resize
+from tqdm import tqdm  # progress bar
+
 def preprocess_to_npy(file_dir, output_dir, patch_size=(256, 256)):
     os.makedirs(output_dir, exist_ok=True)
 
-    # MONAI transform pipeline
+    # MONAI transforms for plain arrays
     transforms = Compose([
         ScaleIntensityRange(a_min=100, a_max=500, b_min=0.0, b_max=1.0, clip=True),
         RandAdjustContrast(prob=0.5, gamma=(0.8, 1.2)),
@@ -59,14 +66,19 @@ def preprocess_to_npy(file_dir, output_dir, patch_size=(256, 256)):
     print(f"Preprocessing {len(files)} files ({total_slices} slices) from '{file_dir}' to '{output_dir}'\n")
 
     slice_counter = 0
-    # Loop through files with tqdm for progress
+
+    # File-level tqdm
     for fname in tqdm(files, desc="Processing files"):
         vol = nib.load(join(file_dir, fname)).get_fdata()
-        for s in range(vol.shape[2]):
+        
+        # Slice-level tqdm for this volume
+        for s in tqdm(range(vol.shape[2]), desc=f"Slices of {fname}", leave=False):
             slice_img = vol[:, :, s]
-            slice_img_dict = {'image': slice_img[np.newaxis, ...]}
-            slice_img_processed = transforms(slice_img_dict)['image'][0]
 
+            # Apply MONAI transforms directly to the array
+            slice_img_processed = transforms(slice_img[np.newaxis, ...])[0]
+
+            # Save slice
             out_name = fname.replace('.nii.gz', '').replace('.nii', '') + f'_slice{s:03d}.npy'
             np.save(join(output_dir, out_name), slice_img_processed)
 
@@ -145,4 +157,5 @@ class DatasetFromFolder2D(data.Dataset):
 #     def __len__(self):
 
 #         return len(self.filenames)
+
 
