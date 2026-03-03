@@ -117,7 +117,7 @@ def main_worker(gpu, args):
     # Add a guard
     if not os.path.exists('data/preprocessed') or len(os.listdir('data/preprocessed')) == 0:
         preprocess_to_npy(args.data, 'data/preprocessed')
-    
+        print("Data preprocessing completed and saved to 'data/preprocessed'.")
     all_files = [join('data/preprocessed', x) for x in os.listdir('data/preprocessed') if x.endswith('.npy')]
     train_files, val_files = train_test_split(all_files, test_size=0.2, random_state=42)
 
@@ -163,6 +163,11 @@ def main_worker(gpu, args):
         )
         logwriter.writeLog([train_batch_time_log, train_data_time_log, train_loss_vec_log, train_loss_con_log, 
                             val_batch_time_log, val_data_time_log, val_loss_vec_log, val_loss_con_log])
+        print(f"Epoch [{epoch+1}/{args.epochs}]")
+        print(f"Train Loss - Vector: {train_loss_vec_log:.4f}, Contrast: {train_loss_con_log:.4f}")
+        print(f"Val   Loss - Vector: {val_loss_vec_log:.4f}, Contrast: {val_loss_con_log:.4f}, Total: {val_loss:.4f}")
+        print("-" * 60)
+
 
 def train(train_loader, model, criterion_vec, criterion_con, optimizer, epoch, args):
     train_batch_time = AverageMeter("Train Batch time", ":6.3f")
