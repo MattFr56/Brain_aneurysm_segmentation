@@ -5,7 +5,7 @@ import cv2
 from torch.utils import data
 import numpy as np
 import nibabel as nib
-from monai.transforms import Compose, ScaleIntensityRanged, RandAdjustContrast, RandGaussianNoise, Resize
+from monai.transforms import Compose, ScaleIntensityRange, RandAdjustContrast, RandGaussianNoise, Resize
 
 def is_image_file(filename):
         return any(filename.endswith(extension) for extension in [".nii", ".nii.gz"])
@@ -24,7 +24,7 @@ def is_image_file(filename):
 def preprocess_to_npy(file_dir, output_dir, patch_size=(256, 256)):
     os.makedirs(output_dir, exist_ok=True)
     transforms = Compose([
-        ScaleIntensityRanged(a_min=100, a_max=500, b_min=0.0, b_max=1.0, clip=True),
+        ScaleIntensityRange(a_min=100, a_max=500, b_min=0.0, b_max=1.0, clip=True),
         RandAdjustContrast(prob=0.5, gamma=(0.8, 1.2)),
         RandGaussianNoise(prob=0.3, std=0.05),
         Resize(spatial_size=patch_size),
@@ -111,4 +111,5 @@ class DatasetFromFolder2D(data.Dataset):
 #         return img
 
 #     def __len__(self):
+
 #         return len(self.filenames)
