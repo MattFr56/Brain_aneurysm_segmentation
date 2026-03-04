@@ -121,17 +121,15 @@ def main_worker(gpu, args):
     shape = (int(args.img_size * 1.5),) * 2  # e.g. (384, 384) for img_size=256
 
     if os.path.isfile(args.npz_path):
-        # ── FAST PATH — single .npz file, one Drive read, everything in RAM ──
+        # ── FAST PATH — load .npz ONCE, share cache between train and val ──
         print(f"Found .npz archive — using fast npz mode: {args.npz_path}")
-        # Need to split keys into train/val at patient level
-        # Load key list without loading data yet
         import numpy as _np_tmp
         all_keys = sorted(_np_tmp.load(args.npz_path).files)
 
-        # Extract unique patient stems to do patient-level split
-        # key format: foldername__patientname_sliceXXX
+        # Patient-level split — extract stems from key format:
+        # foldername__patientname_sliceXXX
         patient_stems = sorted(set('_'.join(k.split('_')[:-1]) for k in all_keys))
-        train_stems, val_stems = train_test_split(
+        train_stems, _ = train_test_split(
             patient_stems, test_size=0.2, random_state=42)
         train_stems = set(train_stems)
 
@@ -142,13 +140,20 @@ def main_worker(gpu, args):
 
         print(f"  Train: {len(train_keys)} slices  Val: {len(val_keys)} slices")
 
-        train_dataset = DatasetFromFolder2D(
-            train_keys, shape, npz_path=args.npz_path)
-        val_dataset   = DatasetFromFolder2D(
-            val_keys,   shape, npz_path=args.npz_path)
+        # Load .npz ONCE into shared cache — avoids loading 2x into RAM
+        print(f"Loading .npz into shared RAM cache (once) ...")
+        npz_data    = _np_tmp.load(args.npz_path)
+        shared_cache = {k: npz_data[k].astype(np.float16) for k in all_keys}
+        npz_data.close()
+        ram_gb = sum(v.nbytes for v in shared_cache.values()) / 1e9
+        print(f"  Done — {ram_gb:.2f} GB shared cache. Zero I/O during training.")
+
+        # Pass shared cache directly — skip per-dataset reload
+        train_dataset = DatasetFromFolder2D(train_keys, shape, cache=shared_cache)
+        val_dataset   = DatasetFromFolder2D(val_keys,   shape, cache=shared_cache)
 
     else:
-        # ── FALLBACK — individual .npy files read directly from Drive ─────────
+        # ── FALLBACK — individual .npy files read directly from Drive ──────
         print(f".npz not found — using npy fallback from {args.preprocessed_dir}")
         print(f"  Tip: run pack_to_npz() in a separate cell for much faster I/O")
         all_files = [join(args.preprocessed_dir, x)
@@ -156,10 +161,8 @@ def main_worker(gpu, args):
                      if x.endswith('.npy')]
         train_files, val_files = train_test_split(
             all_files, test_size=0.2, random_state=42)
-        train_dataset = DatasetFromFolder2D(
-            train_files, shape, preload=False)
-        val_dataset   = DatasetFromFolder2D(
-            val_files,   shape, preload=False)
+        train_dataset = DatasetFromFolder2D(train_files, shape, preload=False)
+        val_dataset   = DatasetFromFolder2D(val_files,   shape, preload=False)
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
