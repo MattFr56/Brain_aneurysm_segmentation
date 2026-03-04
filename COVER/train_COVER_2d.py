@@ -122,9 +122,10 @@ def main_worker(gpu, args):
                  for x in os.listdir(fast_dir) if x.endswith('.npy')]
     train_files, val_files = train_test_split(all_files, test_size=0.2, random_state=42)
 
-    # preload=True loads all slices into RAM dict — zero disk I/O per epoch
-    train_dataset = DatasetFromFolder2D(train_files, (int(args.img_size * 1.5),) * 2, preload=True)
-    val_dataset   = DatasetFromFolder2D(val_files,   (int(args.img_size * 1.5),) * 2, preload=True)
+    # preload=False — /dev/shm is already RAM-backed so reads are fast
+    # avoids loading 4GB+ into Python RAM on top of model + gradients
+    train_dataset = DatasetFromFolder2D(train_files, (int(args.img_size * 1.5),) * 2, preload=False)
+    val_dataset   = DatasetFromFolder2D(val_files,   (int(args.img_size * 1.5),) * 2, preload=False)
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
