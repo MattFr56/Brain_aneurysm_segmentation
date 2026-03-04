@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader
 from models.cover import COVER
 from utils.STN import SpatialTransformer
 from utils.Transform_2d import SpatialTransform2D, CropTransform, AppearanceTransform
-from utils.dataloader_SSP_2d import DatasetFromFolder2D, copy_to_ramdisk
+from utils.dataloader_SSP_2d import DatasetFromFolder2D, pack_to_npz
 from utils.losses import partical_MAE, partical_COS
 import numpy as np
 from tqdm import tqdm
@@ -31,8 +31,11 @@ parser.add_argument("-data", metavar="DIR", default="", nargs="+",
                          "e.g. -data /folder1 /folder2")
 parser.add_argument("-preprocessed_dir",
                     default="/content/drive/MyDrive/CoW_preprocessed",
-                    help="path to already preprocessed .npy slices — "
-                         "preprocessing is skipped if this folder exists and is non-empty")
+                    help="path to folder containing preprocessed .npy slices")
+parser.add_argument("-npz_path",
+                    default="/content/drive/MyDrive/CoW_preprocessed.npz",
+                    help="path to packed .npz archive (faster) — used automatically "
+                         "if the file exists, falls back to -preprocessed_dir otherwise")
 parser.add_argument("-save_dir", metavar="SAVE", default="/content/drive/MyDrive/CoW_checkpoints",
                     help="directory to save checkpoints (use Google Drive path on Colab)")  # FIX 7
 parser.add_argument("-j", "--workers", default=2, type=int, metavar="N",
@@ -115,17 +118,48 @@ def main_worker(gpu, args):
     cudnn.benchmark = True
 
     # ── Data ──────────────────────────────────────────────────────────────────
-    # Copy preprocessed .npy from Drive to /dev/shm RAM disk
-    # Preprocessing is assumed already done via the standalone Colab cell
-    fast_dir  = copy_to_ramdisk(args.preprocessed_dir)
-    all_files = [join(fast_dir, x)
-                 for x in os.listdir(fast_dir) if x.endswith('.npy')]
-    train_files, val_files = train_test_split(all_files, test_size=0.2, random_state=42)
+    shape = (int(args.img_size * 1.5),) * 2  # e.g. (384, 384) for img_size=256
 
-    # preload=False — /dev/shm is already RAM-backed so reads are fast
-    # avoids loading 4GB+ into Python RAM on top of model + gradients
-    train_dataset = DatasetFromFolder2D(train_files, (int(args.img_size * 1.5),) * 2, preload=False)
-    val_dataset   = DatasetFromFolder2D(val_files,   (int(args.img_size * 1.5),) * 2, preload=False)
+    if os.path.isfile(args.npz_path):
+        # ── FAST PATH — single .npz file, one Drive read, everything in RAM ──
+        print(f"Found .npz archive — using fast npz mode: {args.npz_path}")
+        # Need to split keys into train/val at patient level
+        # Load key list without loading data yet
+        import numpy as _np_tmp
+        all_keys = sorted(_np_tmp.load(args.npz_path).files)
+
+        # Extract unique patient stems to do patient-level split
+        # key format: foldername__patientname_sliceXXX
+        patient_stems = sorted(set('_'.join(k.split('_')[:-1]) for k in all_keys))
+        train_stems, val_stems = train_test_split(
+            patient_stems, test_size=0.2, random_state=42)
+        train_stems = set(train_stems)
+
+        train_keys = [k for k in all_keys
+                      if '_'.join(k.split('_')[:-1]) in train_stems]
+        val_keys   = [k for k in all_keys
+                      if '_'.join(k.split('_')[:-1]) not in train_stems]
+
+        print(f"  Train: {len(train_keys)} slices  Val: {len(val_keys)} slices")
+
+        train_dataset = DatasetFromFolder2D(
+            train_keys, shape, npz_path=args.npz_path)
+        val_dataset   = DatasetFromFolder2D(
+            val_keys,   shape, npz_path=args.npz_path)
+
+    else:
+        # ── FALLBACK — individual .npy files read directly from Drive ─────────
+        print(f".npz not found — using npy fallback from {args.preprocessed_dir}")
+        print(f"  Tip: run pack_to_npz() in a separate cell for much faster I/O")
+        all_files = [join(args.preprocessed_dir, x)
+                     for x in os.listdir(args.preprocessed_dir)
+                     if x.endswith('.npy')]
+        train_files, val_files = train_test_split(
+            all_files, test_size=0.2, random_state=42)
+        train_dataset = DatasetFromFolder2D(
+            train_files, shape, preload=False)
+        val_dataset   = DatasetFromFolder2D(
+            val_files,   shape, preload=False)
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
