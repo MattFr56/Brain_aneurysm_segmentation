@@ -28,8 +28,9 @@ from tqdm import tqdm
 parser = argparse.ArgumentParser(description="COVER 2D SSL Pretraining")
 parser.add_argument("-modelname", metavar="NAME", default="COVER_2D_brain_vessels",
                     help="model name used for checkpoint files")
-parser.add_argument("-data", metavar="DIR", default="",
-                    help="path to raw dataset")
+parser.add_argument("-data", metavar="DIR", default="", nargs="+",
+                    help="one or more paths to folders containing NIfTI files "
+                         "e.g. -data /folder1 /folder2")
 parser.add_argument("-save_dir", metavar="SAVE", default="/content/drive/MyDrive/CoW_checkpoints",
                     help="directory to save checkpoints (use Google Drive path on Colab)")  # FIX 7
 parser.add_argument("-j", "--workers", default=2, type=int, metavar="N",
@@ -113,6 +114,7 @@ def main_worker(gpu, args):
 
     # ── Data ──────────────────────────────────────────────────────────────────
     if not os.path.exists('data/preprocessed') or len(os.listdir('data/preprocessed')) == 0:
+        # args.data is a list of folders — works for single or multiple
         preprocess_to_npy(args.data, 'data/preprocessed')
         print("Data preprocessing completed and saved to 'data/preprocessed'.")
 
