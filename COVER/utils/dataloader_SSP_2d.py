@@ -44,20 +44,61 @@ def copy_to_ramdisk(src_dir, ramdisk_dir='/dev/shm/cow_slices'):
 
 # ─── PREPROCESSING ────────────────────────────────────────────────────────────
 
-def preprocess_to_npy(file_dir, output_dir, patch_size=(512, 512),
+def preprocess_to_npy(file_dirs, output_dir, patch_size=(512, 512),
                       hu_min=100, hu_max=500,
                       min_vessel_voxels=50):
     """
-    Load NIfTI volumes, extract axial slices, apply deterministic
-    preprocessing (normalisation + resize) and save as float16 .npy files.
+    Load NIfTI volumes from one or multiple folders, extract axial slices,
+    apply deterministic preprocessing and save as float16 .npy files.
+
+    Args:
+        file_dirs : str or list of str — one or multiple folders containing .nii/.nii.gz
+                    e.g. file_dirs='/data/folder1'
+                    or   file_dirs=['/data/folder1', '/data/folder2']
+                    Files with identical names across folders are disambiguated
+                    automatically using their parent folder name as prefix.
 
     Optimisations (zero quality impact):
       - Skip background slices with fewer than min_vessel_voxels vessel voxels
-        reduces dataset size by ~50-60%, removes useless training signal
-      - Save as float16 instead of float32
-        halves disk/RAM footprint, precision loss negligible after [0,1] clipping
+      - Save as float16 — halves RAM footprint, safe after [0,1] clipping
     """
     os.makedirs(output_dir, exist_ok=True)
+
+    # Normalise to list — works for both single folder and multiple folders
+    if isinstance(file_dirs, str):
+        file_dirs = [file_dirs]
+
+    # Build flat list of (full_path, unique_stem) pairs
+    # unique_stem = foldername__filename to avoid name collisions across folders
+    all_files = []
+    for folder in file_dirs:
+        folder_name = os.path.basename(os.path.normpath(folder))
+        for fname in os.listdir(folder):
+            if is_image_file(fname):
+                full_path   = join(folder, fname)
+                unique_stem = f"{folder_name}__{fname.replace('.nii.gz', '').replace('.nii', '')}"
+                all_files.append((full_path, unique_stem))
+
+    if len(all_files) == 0:
+        raise RuntimeError(f"No NIfTI files found in: {file_dirs}")
+
+    # Check for duplicate stems after prefixing (should never happen but safety check)
+    stems = [s for _, s in all_files]
+    if len(stems) != len(set(stems)):
+        raise RuntimeError("Duplicate file stems detected after prefixing — check folder names.")
+
+    total_slices = sum(nib.load(p).shape[2] for p, _ in all_files)
+    print(f"Preprocessing {len(all_files)} volumes ({total_slices} slices total)")
+    for folder in file_dirs:
+        n = sum(1 for _, s in all_files if s.startswith(os.path.basename(os.path.normpath(folder))))
+        print(f"  {folder}  ({n} volumes)")
+    print(f"  output           : {output_dir}")
+    print(f"  HU window        : [{hu_min}, {hu_max}]")
+    print(f"  min vessel voxels: {min_vessel_voxels}\n")
+
+    slice_counter = 0
+    skipped_blank = 0
+    skipped_bg    = 0
 
     transforms = Compose([
         EnsureType(),
@@ -69,46 +110,26 @@ def preprocess_to_npy(file_dir, output_dir, patch_size=(512, 512),
         Resize(spatial_size=patch_size),
     ])
 
-    files = [f for f in os.listdir(file_dir) if is_image_file(f)]
-    if len(files) == 0:
-        raise RuntimeError(f"No NIfTI files found in '{file_dir}'")
+    for full_path, unique_stem in tqdm(all_files, desc="Volumes"):
+        vol = nib.load(full_path).get_fdata().astype(np.float32)
 
-    total_slices = sum(nib.load(join(file_dir, f)).shape[2] for f in files)
-    print(f"Preprocessing {len(files)} volumes ({total_slices} slices total)\n"
-          f"  source          : {file_dir}\n"
-          f"  output          : {output_dir}\n"
-          f"  HU window       : [{hu_min}, {hu_max}]\n"
-          f"  min vessel voxels: {min_vessel_voxels}\n")
-
-    slice_counter = 0
-    skipped_blank = 0
-    skipped_bg    = 0
-
-    for fname in tqdm(files, desc="Volumes"):
-        vol = nib.load(join(file_dir, fname)).get_fdata().astype(np.float32)
-
-        for s in tqdm(range(vol.shape[2]), desc=f"  {fname}", leave=False):
+        for s in tqdm(range(vol.shape[2]), desc=f"  {unique_stem}", leave=False):
             slice_img = vol[:, :, s]
 
-            # Skip fully blank slices (zero max -> NaN risk)
+            # Skip fully blank slices
             if slice_img.max() == 0:
                 skipped_blank += 1
                 continue
 
-            # Skip slices with too few vessel-range voxels
-            # Only removes slices with almost no vessel signal anyway
+            # Skip near-background slices with almost no vessel signal
             vessel_voxels = int(np.sum((slice_img > hu_min) & (slice_img < hu_max)))
             if vessel_voxels < min_vessel_voxels:
                 skipped_bg += 1
                 continue
 
-            # Apply transforms -> (1, H, W) tensor
-            slice_tensor = transforms(slice_img[np.newaxis, ...])
+            slice_tensor = transforms(slice_img[np.newaxis, ...])  # (1, H, W)
 
-            out_name = (
-                fname.replace('.nii.gz', '').replace('.nii', '')
-                + f'_slice{s:03d}.npy'
-            )
+            out_name = unique_stem + f'_slice{s:03d}.npy'
             # Save as float16 — safe after [0,1] normalisation
             np.save(join(output_dir, out_name),
                     slice_tensor.numpy().astype(np.float16))
