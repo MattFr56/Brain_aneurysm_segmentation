@@ -179,74 +179,126 @@ def preprocess_to_npy(file_dirs, output_dir, patch_size=(256, 256),
 
 # ─── DATASET ──────────────────────────────────────────────────────────────────
 
+def pack_to_npz(npy_dir, npz_path):
+    """
+    Pack all .npy slices from a directory into a single .npz archive.
+    Run once — replaces 39k individual Drive file reads with one single read.
+
+    Usage in Colab (run while training epoch 1):
+        from utils.dataloader_SSP_2d import pack_to_npz
+        pack_to_npz(
+            '/content/drive/MyDrive/CoW_preprocessed',
+            '/content/drive/MyDrive/CoW_preprocessed.npz'
+        )
+    """
+    files = sorted([f for f in os.listdir(npy_dir) if f.endswith('.npy')])
+    if len(files) == 0:
+        raise RuntimeError(f"No .npy files found in {npy_dir}")
+
+    print(f"Packing {len(files)} slices into {npz_path} ...")
+    data_dict = {}
+    for f in tqdm(files, desc="Packing", mininterval=10):
+        arr = np.load(os.path.join(npy_dir, f))
+        if arr.ndim == 3:
+            arr = arr[0]
+        # sanitise key — npz keys cannot contain dots or dashes
+        key = f.replace('.npy', '').replace('-', '_').replace('.', '_')
+        data_dict[key] = arr.astype(np.float16)
+
+    np.savez_compressed(npz_path, **data_dict)
+    size_gb = os.path.getsize(npz_path) / 1e9
+    print(f"Done — {npz_path}  ({size_gb:.2f} GB)")
+
+
 class DatasetFromFolder2D(data.Dataset):
     """
-    Loads preprocessed 2D slices (.npy) for COVER SSL pretraining.
+    Loads preprocessed 2D slices for COVER SSL pretraining.
 
-    Speed optimisation: loads entire dataset into RAM at init time.
-    With float16 storage and background filtering ~190 CTA = 1.5-2GB RAM.
-    Zero quality impact — data is identical to disk version.
+    Supports two modes:
+      1. npz mode  (recommended) — single .npz file loaded into RAM once
+                                    one Drive read per session, then zero I/O
+      2. npy mode  (fallback)    — reads individual .npy files from disk/Drive
+                                    slower but works without packing step
 
     Args:
-        filenames  : list of absolute paths to .npy slice files
-        shape      : (H, W) output spatial size fed to the model
-        preload    : if True (default), load all slices into RAM at init.
-                     Set False only if RAM is insufficient.
+        filenames  : list of .npy paths (npy mode) OR single .npz path in a list
+        shape      : (H, W) output spatial size
+        preload    : load all data into RAM at init (default True for npz,
+                     recommended False for npy to avoid OOM)
+        npz_path   : if provided, load from this .npz file instead of filenames
     """
 
-    def __init__(self, filenames, shape, preload=True):
+    def __init__(self, filenames, shape, preload=False, npz_path=None):
         super(DatasetFromFolder2D, self).__init__()
-        if len(filenames) == 0:
-            raise RuntimeError("DatasetFromFolder2D received an empty file list.")
+        self.shape    = shape
+        self.npz_path = npz_path
+        self.preload  = preload
+        self.cache    = {}
 
-        self.filenames = filenames
-        self.shape     = shape
-        self.preload   = preload
+        if npz_path is not None:
+            # ── NPZ MODE — one file, load everything into RAM ────────────────
+            print(f"Loading dataset from {npz_path} ...")
+            npz           = np.load(npz_path)
+            self.keys     = sorted(npz.files)
+            self.filenames = self.keys
 
-        if self.preload:
-            estimated_gb = len(filenames) * 256 * 256 * 2 / 1e9
-            print(f"Preloading {len(filenames)} slices into RAM "
-                  f"(estimated {estimated_gb:.2f} GB float16) ...")
-            if estimated_gb > 8.0:
-                print(f"  ⚠️  Warning: {estimated_gb:.2f} GB may exceed Colab RAM.")
-                print(f"  Consider raising min_vessel_voxels in preprocess_to_npy")
-                print(f"  or set preload=False to use disk reads instead.")
-            self.cache = {}
-            for path in tqdm(filenames, desc="Caching", leave=False, mininterval=5):
-                arr = np.load(path)
-                # Normalise to (H, W) — drop channel dim if present
-                if arr.ndim == 3:
-                    arr = arr[0]
-                # Store as float16 to minimise RAM footprint
-                self.cache[path] = arr.astype(np.float16)
+            estimated_gb = len(self.keys) * 256 * 256 * 2 / 1e9
+            print(f"  {len(self.keys)} slices  "
+                  f"(estimated {estimated_gb:.2f} GB float16 in RAM)")
+
+            if estimated_gb > 9.0:
+                print(f"  ⚠️  Warning: may exceed Colab RAM — consider "
+                      f"raising min_vessel_voxels when re-preprocessing.")
+
+            for key in tqdm(self.keys, desc="Loading into RAM", mininterval=5):
+                self.cache[key] = npz[key].astype(np.float16)
+            npz.close()
+
             ram_gb = sum(v.nbytes for v in self.cache.values()) / 1e9
-            print(f"  Done — {ram_gb:.2f} GB used in RAM.")
+            print(f"  Done — {ram_gb:.2f} GB used in RAM. Zero I/O during training.")
+
+        else:
+            # ── NPY MODE — individual files ───────────────────────────────────
+            if len(filenames) == 0:
+                raise RuntimeError("DatasetFromFolder2D received an empty file list.")
+            self.filenames = filenames
+
+            if preload:
+                estimated_gb = len(filenames) * 256 * 256 * 2 / 1e9
+                print(f"Preloading {len(filenames)} slices into RAM "
+                      f"(estimated {estimated_gb:.2f} GB) ...")
+                if estimated_gb > 9.0:
+                    print(f"  ⚠️  Warning: may exceed Colab RAM — use npz mode instead.")
+                for path in tqdm(filenames, desc="Caching", leave=False, mininterval=5):
+                    arr = np.load(path)
+                    if arr.ndim == 3:
+                        arr = arr[0]
+                    self.cache[path] = arr.astype(np.float16)
+                ram_gb = sum(v.nbytes for v in self.cache.values()) / 1e9
+                print(f"  Done — {ram_gb:.2f} GB used in RAM.")
 
     def __getitem__(self, index):
-        path = self.filenames[index]
+        key = self.filenames[index]
 
-        if self.preload:
-            # Read from RAM — zero disk I/O per epoch
-            arr = self.cache[path]
+        if key in self.cache:
+            arr = self.cache[key]
         else:
-            # Fallback: read from disk
-            arr = np.load(path)
+            # npy fallback — read from disk
+            arr = np.load(key)
             if arr.ndim == 3:
                 arr = arr[0]
 
-        # Always convert to float32 for GPU computation
         img = torch.from_numpy(arr.astype(np.float32)).unsqueeze(0)  # (1, H, W)
 
-        # Resize to target shape if needed
         if tuple(img.shape[1:]) != tuple(self.shape):
             img = F.interpolate(
-                img.unsqueeze(0),           # (1, 1, H, W)
+                img.unsqueeze(0),
                 size=tuple(self.shape),
                 mode='bilinear',
                 align_corners=False,
-            ).squeeze(0)                    # (1, H, W)
+            ).squeeze(0)
 
-        return img                          # float32 tensor (1, H, W)
+        return img  # float32 tensor (1, H, W)
 
     def __len__(self):
         return len(self.filenames)
