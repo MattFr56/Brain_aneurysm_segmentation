@@ -6,9 +6,7 @@ import shutil
 import glob
 import time
 
-import nibabel as nib
 from os.path import join
-from os import listdir
 from sklearn.model_selection import train_test_split
 
 from monai.transforms import RandRotate, RandFlip, RandAffine, Compose
@@ -20,7 +18,7 @@ from torch.utils.data import DataLoader
 from models.cover import COVER
 from utils.STN import SpatialTransformer
 from utils.Transform_2d import SpatialTransform2D, CropTransform, AppearanceTransform
-from utils.dataloader_SSP_2d import DatasetFromFolder2D, preprocess_to_npy, copy_to_ramdisk
+from utils.dataloader_SSP_2d import DatasetFromFolder2D, copy_to_ramdisk
 from utils.losses import partical_MAE, partical_COS
 import numpy as np
 from tqdm import tqdm
@@ -31,6 +29,10 @@ parser.add_argument("-modelname", metavar="NAME", default="COVER_2D_brain_vessel
 parser.add_argument("-data", metavar="DIR", default="", nargs="+",
                     help="one or more paths to folders containing NIfTI files "
                          "e.g. -data /folder1 /folder2")
+parser.add_argument("-preprocessed_dir",
+                    default="/content/drive/MyDrive/CoW_preprocessed",
+                    help="path to already preprocessed .npy slices — "
+                         "preprocessing is skipped if this folder exists and is non-empty")
 parser.add_argument("-save_dir", metavar="SAVE", default="/content/drive/MyDrive/CoW_checkpoints",
                     help="directory to save checkpoints (use Google Drive path on Colab)")  # FIX 7
 parser.add_argument("-j", "--workers", default=2, type=int, metavar="N",
@@ -113,13 +115,9 @@ def main_worker(gpu, args):
     cudnn.benchmark = True
 
     # ── Data ──────────────────────────────────────────────────────────────────
-    if not os.path.exists('data/preprocessed') or len(os.listdir('data/preprocessed')) == 0:
-        # args.data is a list of folders — works for single or multiple
-        preprocess_to_npy(args.data, 'data/preprocessed')
-        print("Data preprocessing completed and saved to 'data/preprocessed'.")
-
-    # Copy preprocessed slices to /dev/shm RAM disk for faster I/O
-    fast_dir  = copy_to_ramdisk('data/preprocessed')
+    # Copy preprocessed .npy from Drive to /dev/shm RAM disk
+    # Preprocessing is assumed already done via the standalone Colab cell
+    fast_dir  = copy_to_ramdisk(args.preprocessed_dir)
     all_files = [join(fast_dir, x)
                  for x in os.listdir(fast_dir) if x.endswith('.npy')]
     train_files, val_files = train_test_split(all_files, test_size=0.2, random_state=42)
