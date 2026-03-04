@@ -228,41 +228,39 @@ class DatasetFromFolder2D(data.Dataset):
         npz_path   : if provided, load from this .npz file instead of filenames
     """
 
-    def __init__(self, filenames, shape, preload=False, npz_path=None):
+    def __init__(self, filenames, shape, preload=False, npz_path=None, cache=None):
         super(DatasetFromFolder2D, self).__init__()
-        self.shape    = shape
-        self.npz_path = npz_path
-        self.preload  = preload
-        self.cache    = {}
+        self.shape     = shape
+        self.filenames = filenames
 
-        if npz_path is not None:
-            # ── NPZ MODE — one file, load everything into RAM ────────────────
+        if cache is not None:
+            # ── SHARED CACHE MODE — cache built externally, passed in directly
+            # avoids loading npz twice for train and val datasets
+            self.cache = cache
+            print(f"  Using shared cache — {len(filenames)} slices assigned.")
+
+        elif npz_path is not None:
+            # ── NPZ MODE — load npz internally (fallback if no shared cache)
             print(f"Loading dataset from {npz_path} ...")
-            npz           = np.load(npz_path)
-            self.keys     = sorted(npz.files)
-            self.filenames = self.keys
-
-            estimated_gb = len(self.keys) * 256 * 256 * 2 / 1e9
-            print(f"  {len(self.keys)} slices  "
+            npz            = np.load(npz_path)
+            self.filenames = sorted(npz.files)
+            estimated_gb   = len(self.filenames) * 256 * 256 * 2 / 1e9
+            print(f"  {len(self.filenames)} slices "
                   f"(estimated {estimated_gb:.2f} GB float16 in RAM)")
-
             if estimated_gb > 9.0:
-                print(f"  ⚠️  Warning: may exceed Colab RAM — consider "
-                      f"raising min_vessel_voxels when re-preprocessing.")
-
-            for key in tqdm(self.keys, desc="Loading into RAM", mininterval=5):
+                print(f"  ⚠️  Warning: may exceed Colab RAM.")
+            self.cache = {}
+            for key in tqdm(self.filenames, desc="Loading into RAM", mininterval=5):
                 self.cache[key] = npz[key].astype(np.float16)
             npz.close()
-
             ram_gb = sum(v.nbytes for v in self.cache.values()) / 1e9
-            print(f"  Done — {ram_gb:.2f} GB used in RAM. Zero I/O during training.")
+            print(f"  Done — {ram_gb:.2f} GB in RAM. Zero I/O during training.")
 
         else:
-            # ── NPY MODE — individual files ───────────────────────────────────
+            # ── NPY MODE — individual files from disk ─────────────────────────
             if len(filenames) == 0:
                 raise RuntimeError("DatasetFromFolder2D received an empty file list.")
-            self.filenames = filenames
-
+            self.cache = {}
             if preload:
                 estimated_gb = len(filenames) * 256 * 256 * 2 / 1e9
                 print(f"Preloading {len(filenames)} slices into RAM "
