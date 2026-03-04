@@ -20,7 +20,7 @@ from torch.utils.data import DataLoader
 from models.cover import COVER
 from utils.STN import SpatialTransformer
 from utils.Transform_2d import SpatialTransform2D, CropTransform, AppearanceTransform
-from utils.dataloader_SSP_2d import DatasetFromFolder2D, preprocess_to_npy
+from utils.dataloader_SSP_2d import DatasetFromFolder2D, preprocess_to_npy, copy_to_ramdisk
 from utils.losses import partical_MAE, partical_COS
 import numpy as np
 from tqdm import tqdm
@@ -54,7 +54,7 @@ parser.add_argument("--n_channels", default=1, type=int,
                     help="number of input channels")
 parser.add_argument("--amp", default=2, type=int,
                     help="amplification of the kernel (default: 2)")
-parser.add_argument("--degree", default=0.5, type=float,
+parser.add_argument("--degree", default=1.5, type=float,
                     help="spatial transformation degree (default: 1.5)")
 
 
@@ -116,12 +116,15 @@ def main_worker(gpu, args):
         preprocess_to_npy(args.data, 'data/preprocessed')
         print("Data preprocessing completed and saved to 'data/preprocessed'.")
 
-    all_files = [join('data/preprocessed', x)
-                 for x in os.listdir('data/preprocessed') if x.endswith('.npy')]
+    # Copy preprocessed slices to /dev/shm RAM disk for faster I/O
+    fast_dir  = copy_to_ramdisk('data/preprocessed')
+    all_files = [join(fast_dir, x)
+                 for x in os.listdir(fast_dir) if x.endswith('.npy')]
     train_files, val_files = train_test_split(all_files, test_size=0.2, random_state=42)
 
-    train_dataset = DatasetFromFolder2D(train_files, (int(args.img_size * 1.5),) * 2)
-    val_dataset   = DatasetFromFolder2D(val_files,   (int(args.img_size * 1.5),) * 2)
+    # preload=True loads all slices into RAM dict — zero disk I/O per epoch
+    train_dataset = DatasetFromFolder2D(train_files, (int(args.img_size * 1.5),) * 2, preload=True)
+    val_dataset   = DatasetFromFolder2D(val_files,   (int(args.img_size * 1.5),) * 2, preload=True)
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.workers)
