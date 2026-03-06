@@ -17,7 +17,7 @@ from torch.backends import cudnn
 from torch.utils.data import DataLoader
 from models.cover import COVER
 from utils.STN import SpatialTransformer
-from utils.Transform_2d import CropTransform, AppearanceTransform
+from utils.Transform_2d import CropTransform
 from utils.dataloader_SSP_2d import DatasetFromFolder2D, pack_to_npz
 from utils.losses import partical_MAE, partical_COS
 import numpy as np
@@ -144,12 +144,7 @@ def main_worker(gpu, args):
     num_gpus = torch.cuda.device_count()
     print(f"GPUs available: {num_gpus}")
 
-    if num_gpus > 1:
-        print(f"Using DataParallel across {num_gpus} GPUs")
-        model = torch.nn.DataParallel(model)
-        model = model.cuda()
-        device = torch.device("cuda")
-    elif args.gpu is not None:
+    if args.gpu is not None:
         torch.cuda.set_device(args.gpu)
         model = model.cuda(args.gpu)
         device = torch.device(f"cuda:{args.gpu}")
@@ -168,20 +163,37 @@ def main_worker(gpu, args):
 
     optimizer = torch.optim.Adam(model.parameters(), init_lr, weight_decay=args.weight_decay)
 
-    # ── Resume from checkpoint ────────────────────────────────────────────────
+    # ── Resume from checkpoint — auto-detects latest if --start-epoch not set ─
+    loc = "cuda:{}".format(args.gpu) if args.gpu is not None else "cpu"
+
     if args.start_epoch > 0:
+        # Explicit epoch specified
         ckpt_path = os.path.join(
             args.save_dir,
             "checkpoint_{}_{:04d}.pth.tar".format(args.modelname, args.start_epoch - 1)
         )
-        if os.path.isfile(ckpt_path):
-            print("=> loading checkpoint '{}'".format(ckpt_path))
-            loc = "cuda:{}".format(args.gpu) if args.gpu is not None else "cpu"
-            checkpoint = torch.load(ckpt_path, map_location=loc)
-            model.load_state_dict(checkpoint["state_dict"])
-            print("=> loaded checkpoint (epoch {})".format(checkpoint["epoch"]))  # FIX 8
-        else:
-            print("=> no checkpoint found at '{}'".format(ckpt_path))
+    else:
+        # Auto-detect latest checkpoint in save_dir
+        import glob
+        ckpt_pattern = os.path.join(
+            args.save_dir,
+            "checkpoint_{}_*.pth.tar".format(args.modelname)
+        )
+        existing = sorted(glob.glob(ckpt_pattern))
+        ckpt_path = existing[-1] if existing else None
+
+    if ckpt_path and os.path.isfile(ckpt_path):
+        print("=> loading checkpoint '{}'".format(ckpt_path))
+        checkpoint = torch.load(ckpt_path, map_location=loc)
+        model.load_state_dict(checkpoint["state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer"])
+        args.start_epoch = checkpoint["epoch"]
+        best_val_loss    = checkpoint.get("best_val_loss", float("inf"))
+        print("=> resumed from epoch {}".format(args.start_epoch))
+    elif ckpt_path:
+        print("=> no checkpoint found at '{}'".format(ckpt_path))
+    else:
+        print("=> no checkpoint found — starting from scratch")
 
     cudnn.benchmark = True
 
@@ -361,8 +373,7 @@ def train(train_loader, model, criterion_vec, criterion_con, optimizer, epoch, a
         end = time.time()
 
         # Update tqdm postfix with running averages
-        pbar.set_postfix(loss_vec=f"{train_losses_vec.avg:.4f}",
-                         loss_con=f"{train_losses_con.avg:.4f}")
+        pbar.set_postfix(vec=f"{train_losses_vec.avg:.4f}", con=f"{train_losses_con.avg:.4f}")
 
     return train_batch_time.avg, train_data_time.avg, train_losses_vec.avg, train_losses_con.avg
 
