@@ -64,6 +64,34 @@ parser.add_argument("--degree", default=1.5, type=float,
                     help="spatial transformation degree (default: 1.5)")
 
 
+# ─── GPU FLOW GENERATOR ───────────────────────────────────────────────────────
+
+def make_flow_gpu(batch_size, shape, dev, deg):
+    """
+    Batched random affine displacement field generated entirely on GPU.
+    Replaces the per-sample numpy loop from SpatialTransform2D (~10x faster).
+    """
+    B, H, W = batch_size, shape[0], shape[1]
+    angle = (torch.rand(B, device=dev) * 2 - 1) * deg * np.pi / 9
+    scale = 1.0 + (torch.rand(B, device=dev) * 2 - 1) * deg * 0.5
+    tx    = (torch.rand(B, device=dev) * 2 - 1) * deg * 0.2
+    ty    = (torch.rand(B, device=dev) * 2 - 1) * deg * 0.2
+    cos_a, sin_a = torch.cos(angle), torch.sin(angle)
+    theta = torch.stack([
+        torch.stack([cos_a * scale, -sin_a, tx], dim=1),
+        torch.stack([sin_a, cos_a * scale,  ty], dim=1),
+    ], dim=1)  # (B, 2, 3)
+    grid = torch.nn.functional.affine_grid(
+        theta, (B, 1, H, W), align_corners=True)
+    base = torch.nn.functional.affine_grid(
+        torch.eye(2, 3, device=dev).unsqueeze(0).expand(B, -1, -1),
+        (B, 1, H, W), align_corners=True)
+    flow = (grid - base).permute(0, 3, 1, 2)
+    flow[:, 0] *= (W - 1) / 2
+    flow[:, 1] *= (H - 1) / 2
+    return flow
+
+
 def main():
     args = parser.parse_args()
     main_worker(args.gpu, args)
@@ -176,28 +204,6 @@ def main_worker(gpu, args):
     crop_aug = CropTransform((args.img_size, args.img_size))
 
     degree = args.degree
-
-    def make_flow_gpu(batch_size, shape, dev, deg):
-        """Batched random affine flow on GPU — replaces per-sample numpy loop."""
-        B, H, W = batch_size, shape[0], shape[1]
-        angle = (torch.rand(B, device=dev) * 2 - 1) * deg * np.pi / 9
-        scale = 1.0 + (torch.rand(B, device=dev) * 2 - 1) * deg * 0.5
-        tx    = (torch.rand(B, device=dev) * 2 - 1) * deg * 0.2
-        ty    = (torch.rand(B, device=dev) * 2 - 1) * deg * 0.2
-        cos_a, sin_a = torch.cos(angle), torch.sin(angle)
-        theta = torch.stack([
-            torch.stack([cos_a * scale, -sin_a, tx], dim=1),
-            torch.stack([sin_a, cos_a * scale,  ty], dim=1),
-        ], dim=1)  # (B, 2, 3)
-        grid = torch.nn.functional.affine_grid(
-            theta, (B, 1, H, W), align_corners=True)
-        base = torch.nn.functional.affine_grid(
-            torch.eye(2, 3, device=dev).unsqueeze(0).expand(B, -1, -1),
-            (B, 1, H, W), align_corners=True)
-        flow = (grid - base).permute(0, 3, 1, 2)
-        flow[:, 0] *= (W - 1) / 2
-        flow[:, 1] *= (H - 1) / 2
-        return flow
 
 
     monai_aug = Compose([
