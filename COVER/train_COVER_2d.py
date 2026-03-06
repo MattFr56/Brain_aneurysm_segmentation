@@ -226,12 +226,12 @@ def main_worker(gpu, args):
 
         train_batch_time_log, train_data_time_log, train_loss_vec_log, train_loss_con_log = train(
             train_loader, model, criterion_vec, criterion_con, optimizer, epoch, args,
-            stn, app_aug, spatial_aug, crop_aug, monai_aug  # FIX 6
+            stn, app_aug, crop_aug, monai_aug
         )
 
         val_batch_time_log, val_data_time_log, val_loss_vec_log, val_loss_con_log = validate(
             val_loader, model, criterion_vec, criterion_con, epoch, args,
-            stn, app_aug, spatial_aug, crop_aug, monai_aug  # FIX 6
+            stn, app_aug, crop_aug, monai_aug
         )
 
         val_loss = val_loss_vec_log + val_loss_con_log
@@ -269,7 +269,7 @@ def main_worker(gpu, args):
 # ─── TRAIN ────────────────────────────────────────────────────────────────────
 
 def train(train_loader, model, criterion_vec, criterion_con, optimizer, epoch, args,
-          stn, app_aug, spatial_aug, crop_aug, monai_aug):  # FIX 6: received as args
+          stn, app_aug, crop_aug, monai_aug):
     train_batch_time = AverageMeter("Train Batch time", ":6.3f")
     train_data_time  = AverageMeter("Train Data time",  ":6.3f")
     train_losses_vec = AverageMeter("Train Loss_vec",   ":.4f")
@@ -344,7 +344,7 @@ def train(train_loader, model, criterion_vec, criterion_con, optimizer, epoch, a
 # ─── VALIDATE ─────────────────────────────────────────────────────────────────
 
 def validate(val_loader, model, criterion_vec, criterion_con, epoch, args,
-             stn, app_aug, spatial_aug, crop_aug, monai_aug):  # FIX 6
+             stn, app_aug, crop_aug, monai_aug):
     val_batch_time = AverageMeter("Val Batch time", ":6.3f")
     val_data_time  = AverageMeter("Val Data time",  ":6.3f")
     val_losses_vec = AverageMeter("Val Loss_vec",   ":.4f")
