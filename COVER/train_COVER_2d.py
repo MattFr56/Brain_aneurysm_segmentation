@@ -228,7 +228,8 @@ def main_worker(gpu, args):
 
     # ── FIX 6: instantiate augmentation objects ONCE here, pass to train/val ──
     device = "cuda:{}".format(args.gpu) if args.gpu is not None else "cpu"
-    stn = SpatialTransformer().cuda(args.gpu) if args.gpu is not None else SpatialTransformer()
+    stn      = SpatialTransformer().cuda(args.gpu) if args.gpu is not None else SpatialTransformer()
+    crop_aug = CropTransform((args.img_size, args.img_size))
 
     degree = args.degree
 
