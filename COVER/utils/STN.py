@@ -7,17 +7,20 @@ import numpy as np
 class SpatialTransformer(nn.Module):
     def __init__(self):
         super(SpatialTransformer, self).__init__()
+        self._grid_cache = {}   # cache grids by (shape, device) — avoids rebuild each batch
+
+    def _get_grid(self, shape, device, dtype):
+        key = (shape, device)
+        if key not in self._grid_cache:
+            vectors = [torch.arange(0, s, device=device, dtype=dtype) for s in shape]
+            grids   = torch.meshgrid(vectors, indexing='ij')
+            grid    = torch.unsqueeze(torch.stack(grids), 0)  # (1, 2, H, W)
+            self._grid_cache[key] = grid
+        return self._grid_cache[key]
 
     def forward(self, src, flow, mode='bilinear'):
-        shape = flow.shape[2:]
-        vectors = [torch.arange(0, s) for s in shape]
-
-        # FIX 1: explicit indexing='ij' — deprecation fix (same as train script)
-        grids = torch.meshgrid(vectors, indexing='ij')
-        grid  = torch.stack(grids)          # (2, H, W) or (3, D, H, W)
-        grid  = torch.unsqueeze(grid, 0)    # (1, 2, H, W)
-        grid  = grid.type(flow.dtype).to(src.device)
-
+        shape    = flow.shape[2:]
+        grid     = self._get_grid(shape, flow.device, flow.dtype)
         new_locs = grid + flow
         for i in range(len(shape)):
             new_locs[:, i, ...] = 2 * (new_locs[:, i, ...] / (shape[i] - 1) - 0.5)
@@ -72,4 +75,4 @@ class AffineTransformer2D(nn.Module):
             [src.shape[0], 2, src.shape[2], src.shape[3]],
             align_corners=True   # ✅
         )
-        return nnf.grid_sample(src, grid, mode=mode, align_corners=True)  # ✅        return nnf.grid_sample(src, grid, mode=mode)
+        return nnf.grid_sample(src, grid, mode=mode, align_corners=True)  # ✅
