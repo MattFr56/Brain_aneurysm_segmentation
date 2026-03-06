@@ -141,9 +141,20 @@ def main_worker(gpu, args):
     # Infer learning rate before changing batch size
     init_lr = args.lr * args.batch_size / 256
 
-    if args.gpu is not None:
+    num_gpus = torch.cuda.device_count()
+    print(f"GPUs available: {num_gpus}")
+
+    if num_gpus > 1:
+        print(f"Using DataParallel across {num_gpus} GPUs")
+        model = torch.nn.DataParallel(model)
+        model = model.cuda()
+        device = torch.device("cuda")
+    elif args.gpu is not None:
         torch.cuda.set_device(args.gpu)
         model = model.cuda(args.gpu)
+        device = torch.device(f"cuda:{args.gpu}")
+    else:
+        device = torch.device("cpu")
 
     def count_parameters_in_M(model):
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -227,8 +238,8 @@ def main_worker(gpu, args):
         val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.workers)
 
     # ── FIX 6: instantiate augmentation objects ONCE here, pass to train/val ──
-    device = "cuda:{}".format(args.gpu) if args.gpu is not None else "cpu"
-    stn      = SpatialTransformer().cuda(args.gpu) if args.gpu is not None else SpatialTransformer()
+    # device already set above via DataParallel/single-GPU block
+    stn      = SpatialTransformer().to(device)
     crop_aug = CropTransform((args.img_size, args.img_size))
 
     degree = args.degree
@@ -249,12 +260,12 @@ def main_worker(gpu, args):
 
         train_batch_time_log, train_data_time_log, train_loss_vec_log, train_loss_con_log = train(
             train_loader, model, criterion_vec, criterion_con, optimizer, epoch, args,
-            stn, crop_aug
+            stn, crop_aug, device
         )
 
         val_batch_time_log, val_data_time_log, val_loss_vec_log, val_loss_con_log = validate(
             val_loader, model, criterion_vec, criterion_con, epoch, args,
-            stn, crop_aug
+            stn, crop_aug, device
         )
 
         val_loss = val_loss_vec_log + val_loss_con_log
@@ -269,7 +280,7 @@ def main_worker(gpu, args):
             {
                 "epoch": epoch + 1,
                 "arch": "COVER_2D",  # FIX 1
-                "state_dict": model.state_dict(),
+                "state_dict": (model.module if hasattr(model, "module") else model).state_dict(),
                 "optimizer": optimizer.state_dict(),
                 "best_val_loss": best_val_loss,
             },
@@ -292,7 +303,7 @@ def main_worker(gpu, args):
 # ─── TRAIN ────────────────────────────────────────────────────────────────────
 
 def train(train_loader, model, criterion_vec, criterion_con, optimizer, epoch, args,
-          stn, crop_aug):
+          stn, crop_aug, device):
     train_batch_time = AverageMeter("Train Batch time", ":6.3f")
     train_data_time  = AverageMeter("Train Data time",  ":6.3f")
     train_losses_vec = AverageMeter("Train Loss_vec",   ":.4f")
@@ -307,7 +318,7 @@ def train(train_loader, model, criterion_vec, criterion_con, optimizer, epoch, a
         train_data_time.update(time.time() - end)
 
         if args.gpu is not None:
-            img = img.cuda(args.gpu, non_blocking=True)
+            img = img.to(device, non_blocking=True)
 
         # Batched GPU augmentation — replaces per-sample MONAI CPU loop
         im_aug = batched_aug(img)
@@ -359,7 +370,7 @@ def train(train_loader, model, criterion_vec, criterion_con, optimizer, epoch, a
 # ─── VALIDATE ─────────────────────────────────────────────────────────────────
 
 def validate(val_loader, model, criterion_vec, criterion_con, epoch, args,
-             stn, crop_aug):
+             stn, crop_aug, device):
     val_batch_time = AverageMeter("Val Batch time", ":6.3f")
     val_data_time  = AverageMeter("Val Data time",  ":6.3f")
     val_losses_vec = AverageMeter("Val Loss_vec",   ":.4f")
@@ -375,7 +386,7 @@ def validate(val_loader, model, criterion_vec, criterion_con, epoch, args,
             val_data_time.update(time.time() - end)
 
             if args.gpu is not None:
-                img = img.cuda(args.gpu, non_blocking=True)
+                img = img.to(device, non_blocking=True)
 
             # Batched GPU augmentation — replaces per-sample MONAI CPU loop
             im_aug = batched_aug(img)
@@ -392,7 +403,7 @@ def validate(val_loader, model, criterion_vec, criterion_con, epoch, args,
             flow_gt = crop_aug.augment_crop(flow_gt, crop_code)
             im_M    = gpu_appearance_aug(im_M)
 
-            device  = torch.device('cuda:{}'.format(args.gpu))
+            # device passed as argument
             im_M    = im_M.to(device)
             im_F    = im_F.to(device)
             flow_gt = flow_gt.to(device)
