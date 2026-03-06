@@ -11,10 +11,10 @@ class CropTransform(object):
         self.crop_shape = crop_shape
 
     def rand_code(self, img_shape):
-        code = []
-        for i in range(2):
-            code.append(np.random.randint(img_shape[i] - self.crop_shape[i]))
-        return code
+        return [
+            int(torch.randint(0, img_shape[i] - self.crop_shape[i], (1,)).item())
+            for i in range(2)
+        ]
 
     def augment_crop(self, image, code):
         # Pure tensor slicing — device-agnostic, no fix needed
