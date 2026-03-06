@@ -66,6 +66,19 @@ parser.add_argument("--degree", default=1.5, type=float,
 
 # ─── BATCHED GPU AUGMENTATION ────────────────────────────────────────────────
 
+
+def gpu_appearance_aug(x):
+    """Pure GPU appearance augmentation — no scipy, no CPU round-trip."""
+    factor = 0.75 + torch.rand(1, device=x.device) * 0.5
+    mn  = x.mean()
+    x   = (x - mn) * factor + mn
+    x   = x + (torch.rand(1, device=x.device) - 0.5) * 0.1
+    std = torch.rand(1, device=x.device) * 0.04
+    x   = x + torch.randn_like(x) * std
+    if torch.rand(1).item() < 0.3:
+        x = torch.nn.functional.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
+    return x.clamp(0.0, 1.0)
+
 def batched_aug(img):
     """
     Lightweight appearance augmentation on GPU — replaces per-sample MONAI CPU loop.
@@ -216,8 +229,6 @@ def main_worker(gpu, args):
     # ── FIX 6: instantiate augmentation objects ONCE here, pass to train/val ──
     device = "cuda:{}".format(args.gpu) if args.gpu is not None else "cpu"
     stn = SpatialTransformer().cuda(args.gpu) if args.gpu is not None else SpatialTransformer()
-    app_aug = AppearanceTransform()
-    crop_aug = CropTransform((args.img_size, args.img_size))
 
     degree = args.degree
 
@@ -237,12 +248,12 @@ def main_worker(gpu, args):
 
         train_batch_time_log, train_data_time_log, train_loss_vec_log, train_loss_con_log = train(
             train_loader, model, criterion_vec, criterion_con, optimizer, epoch, args,
-            stn, app_aug, crop_aug
+            stn, crop_aug
         )
 
         val_batch_time_log, val_data_time_log, val_loss_vec_log, val_loss_con_log = validate(
             val_loader, model, criterion_vec, criterion_con, epoch, args,
-            stn, app_aug, crop_aug
+            stn, crop_aug
         )
 
         val_loss = val_loss_vec_log + val_loss_con_log
@@ -280,7 +291,7 @@ def main_worker(gpu, args):
 # ─── TRAIN ────────────────────────────────────────────────────────────────────
 
 def train(train_loader, model, criterion_vec, criterion_con, optimizer, epoch, args,
-          stn, app_aug, crop_aug):
+          stn, crop_aug):
     train_batch_time = AverageMeter("Train Batch time", ":6.3f")
     train_data_time  = AverageMeter("Train Data time",  ":6.3f")
     train_losses_vec = AverageMeter("Train Loss_vec",   ":.4f")
@@ -306,18 +317,12 @@ def train(train_loader, model, criterion_vec, criterion_con, optimizer, epoch, a
             dev=im_aug.device, deg=args.degree)
         im_F = stn(im_aug, flow_gt)
 
-        # Crop + appearance augmentation
+        # Crop + GPU appearance augmentation
         crop_code = crop_aug.rand_code(im_aug.shape[2:])
-        im_M      = crop_aug.augment_crop(im_aug, crop_code)
-        im_M      = app_aug.rand_aug(im_M)
-        im_F      = crop_aug.augment_crop(im_F, crop_code)
-        flow_gt   = crop_aug.augment_crop(flow_gt, crop_code)
-
-        # crop_aug / app_aug may return CPU tensors — re-send to GPU
-        device  = torch.device('cuda:{}'.format(args.gpu))
-        im_M    = im_M.to(device)
-        im_F    = im_F.to(device)
-        flow_gt = flow_gt.to(device)
+        im_M    = crop_aug.augment_crop(im_aug, crop_code)
+        im_F    = crop_aug.augment_crop(im_F,   crop_code)
+        flow_gt = crop_aug.augment_crop(flow_gt, crop_code)
+        im_M    = gpu_appearance_aug(im_M)
 
         # Forward pass
         flow_pred, f_M, f_F = model(M=im_M, F=im_F)
@@ -353,7 +358,7 @@ def train(train_loader, model, criterion_vec, criterion_con, optimizer, epoch, a
 # ─── VALIDATE ─────────────────────────────────────────────────────────────────
 
 def validate(val_loader, model, criterion_vec, criterion_con, epoch, args,
-             stn, app_aug, crop_aug):
+             stn, crop_aug):
     val_batch_time = AverageMeter("Val Batch time", ":6.3f")
     val_data_time  = AverageMeter("Val Data time",  ":6.3f")
     val_losses_vec = AverageMeter("Val Loss_vec",   ":.4f")
@@ -381,12 +386,11 @@ def validate(val_loader, model, criterion_vec, criterion_con, epoch, args,
             im_F = stn(im_aug, flow_gt)
 
             crop_code = crop_aug.rand_code(im_aug.shape[2:])
-            im_M      = crop_aug.augment_crop(im_aug, crop_code)
-            im_M      = app_aug.rand_aug(im_M)
-            im_F      = crop_aug.augment_crop(im_F, crop_code)
-            flow_gt   = crop_aug.augment_crop(flow_gt, crop_code)
+            im_M    = crop_aug.augment_crop(im_aug, crop_code)
+            im_F    = crop_aug.augment_crop(im_F,   crop_code)
+            flow_gt = crop_aug.augment_crop(flow_gt, crop_code)
+            im_M    = gpu_appearance_aug(im_M)
 
-            # crop_aug / app_aug may return CPU tensors — re-send to GPU
             device  = torch.device('cuda:{}'.format(args.gpu))
             im_M    = im_M.to(device)
             im_F    = im_F.to(device)
@@ -415,20 +419,27 @@ def validate(val_loader, model, criterion_vec, criterion_con, epoch, args,
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
 
+_mask_grid_cache = {}
+
 def build_mask(flow_gt):
     """Build a binary mask of pixels whose displaced location stays inside [0,1]."""
-    shape = flow_gt.shape[2:]
-    vectors = [torch.arange(0, s) for s in shape]
-    # FIX 4: explicit indexing='ij' to silence deprecation warning
-    grids = torch.meshgrid(vectors, indexing='ij')
-    grid  = torch.stack(grids)
-    grid  = torch.unsqueeze(grid, 0).float().to(flow_gt.device)
+    shape  = flow_gt.shape[2:]
+    device = flow_gt.device
+    key    = (shape, device)
+    # Use cached grid — avoids CPU arange + GPU transfer every batch
+    if key not in _mask_grid_cache:
+        vectors = [torch.arange(0, s, device=device, dtype=torch.float32) for s in shape]
+        grids   = torch.meshgrid(vectors, indexing='ij')
+        _mask_grid_cache[key] = torch.stack(grids).unsqueeze(0)  # (1,2,H,W)
+    grid = _mask_grid_cache[key]
 
     new_locs = grid + flow_gt
-    for i in range(len(shape)):
-        new_locs[:, i, ...] = new_locs[:, i, ...] / (shape[i] - 1)
+    # Vectorised normalisation — no Python loop
+    shape_t  = torch.tensor([s - 1 for s in shape],
+                             dtype=torch.float32, device=device).view(1, 2, 1, 1)
+    new_locs = new_locs / shape_t
 
-    in_bounds = (new_locs >= 0) & (new_locs <= 1)               # bool tensor
+    in_bounds = (new_locs >= 0) & (new_locs <= 1)
     mask = in_bounds[:, 0:1].float() * in_bounds[:, 1:2].float()
     return mask
 
