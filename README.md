@@ -6,4 +6,4 @@ The main idea is to design a robust CTA segmentation model based on a pixel-wise
 
 Curating a whole set of CTA with their corresponding masks is extremely time-consuming and demand a meticulous work.
 While supervised learning needs huge ammount of data wich can hinder its utilization, the combination of SSL may be benificial in figuring out the best number of data/results tradeoff. 
-All the .py and .ipynb are runnable on free google colab.
+All the .py and .ipynb are runnable on free google colab or kaggle by adjusting the code.
