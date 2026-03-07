@@ -36,7 +36,7 @@ if not os.path.exists('/content/main/Brain_aneurysm_segmentation'):
 
 SSL_CHECKPOINT = '/content/model_final_best.pth.tar'
 NPZ_PATH       = '/content/CoW_preprocessed.npz'
-COVER_PATH     = '/content/main/Brain_aneurysm_segmentation/COVER/COVER'
+COVER_PATH     = '/content/Brain_aneurysm_segmentation/COVER'
 CSV_PATH       = '/content/COVER_2D_CoW.csv'
 OUTPUT_DIR     = '/content/drive/MyDrive/CoW_visualizations'
 os.makedirs(OUTPUT_DIR, exist_ok=True)
