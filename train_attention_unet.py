@@ -75,12 +75,12 @@ def get_args():
     parser.add_argument("-kaggle_dataset", default="",
                         help="Kaggle dataset handle for backup e.g. 'user/cow-seg-checkpoints'")
     parser.add_argument("--backup_every", default=5,  type=int)
-    parser.add_argument("--epochs",       default=50, type=int)
-    parser.add_argument("--batch_size",   default=8,  type=int)
+    parser.add_argument("--epochs",       default=150, type=int)
+    parser.add_argument("--batch_size",   default=32,  type=int)
     parser.add_argument("--lr",           default=1e-4, type=float)
     parser.add_argument("--img_size",     default=256,  type=int)
     parser.add_argument("--val_interval", default=1,    type=int)
-    parser.add_argument("--freeze_epochs",default=5,    type=int,
+    parser.add_argument("--freeze_epochs",default=10,    type=int,
                         help="freeze encoder for first N epochs (phase 1)")
     parser.add_argument("--workers",      default=0,    type=int)
     parser.add_argument("--gpu",          default=0,    type=int)
