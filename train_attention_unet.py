@@ -75,7 +75,7 @@ def get_args():
     parser.add_argument("-kaggle_dataset", default="",
                         help="Kaggle dataset handle for backup e.g. 'user/cow-seg-checkpoints'")
     parser.add_argument("--backup_every", default=5,  type=int)
-    parser.add_argument("--epochs",       default=150, type=int)
+    parser.add_argument("--epochs",       default=120, type=int)
     parser.add_argument("--batch_size",   default=32,  type=int)
     parser.add_argument("--lr",           default=1e-4, type=float)
     parser.add_argument("--img_size",     default=256,  type=int)
@@ -280,26 +280,93 @@ def gpu_augment(img, msk, device):
 
 # ─── SSL ENCODER TRANSFER ─────────────────────────────────────────────────────
 
+# Explicit layer mapping: COVER backbone → MONAI AttentionUnet encoder
+# Derived from printing both model's named_parameters()
+COVER_TO_ATTUNET = {
+    # inc → model.0 (first encoder block)
+    "backbone.inc.double_conv.0.weight":  "model.0.conv.0.conv.weight",
+    "backbone.inc.double_conv.0.bias":    "model.0.conv.0.conv.bias",
+    "backbone.inc.double_conv.1.weight":  "model.0.conv.0.adn.N.weight",
+    "backbone.inc.double_conv.1.bias":    "model.0.conv.0.adn.N.bias",
+    "backbone.inc.double_conv.3.weight":  "model.0.conv.1.conv.weight",
+    "backbone.inc.double_conv.3.bias":    "model.0.conv.1.conv.bias",
+    "backbone.inc.double_conv.4.weight":  "model.0.conv.1.adn.N.weight",
+    "backbone.inc.double_conv.4.bias":    "model.0.conv.1.adn.N.bias",
+
+    # down1 → model.1.submodule.0 (encoder block 2)
+    "backbone.down1.maxpool_conv.1.double_conv.0.weight": "model.1.submodule.0.conv.0.conv.weight",
+    "backbone.down1.maxpool_conv.1.double_conv.0.bias":   "model.1.submodule.0.conv.0.conv.bias",
+    "backbone.down1.maxpool_conv.1.double_conv.1.weight": "model.1.submodule.0.conv.0.adn.N.weight",
+    "backbone.down1.maxpool_conv.1.double_conv.1.bias":   "model.1.submodule.0.conv.0.adn.N.bias",
+    "backbone.down1.maxpool_conv.1.double_conv.3.weight": "model.1.submodule.0.conv.1.conv.weight",
+    "backbone.down1.maxpool_conv.1.double_conv.3.bias":   "model.1.submodule.0.conv.1.conv.bias",
+    "backbone.down1.maxpool_conv.1.double_conv.4.weight": "model.1.submodule.0.conv.1.adn.N.weight",
+    "backbone.down1.maxpool_conv.1.double_conv.4.bias":   "model.1.submodule.0.conv.1.adn.N.bias",
+
+    # down2 → model.1.submodule.1.submodule.0 (encoder block 3)
+    "backbone.down2.maxpool_conv.1.double_conv.0.weight": "model.1.submodule.1.submodule.0.conv.0.conv.weight",
+    "backbone.down2.maxpool_conv.1.double_conv.0.bias":   "model.1.submodule.1.submodule.0.conv.0.conv.bias",
+    "backbone.down2.maxpool_conv.1.double_conv.1.weight": "model.1.submodule.1.submodule.0.conv.0.adn.N.weight",
+    "backbone.down2.maxpool_conv.1.double_conv.1.bias":   "model.1.submodule.1.submodule.0.conv.0.adn.N.bias",
+    "backbone.down2.maxpool_conv.1.double_conv.3.weight": "model.1.submodule.1.submodule.0.conv.1.conv.weight",
+    "backbone.down2.maxpool_conv.1.double_conv.3.bias":   "model.1.submodule.1.submodule.0.conv.1.conv.bias",
+    "backbone.down2.maxpool_conv.1.double_conv.4.weight": "model.1.submodule.1.submodule.0.conv.1.adn.N.weight",
+    "backbone.down2.maxpool_conv.1.double_conv.4.bias":   "model.1.submodule.1.submodule.0.conv.1.adn.N.bias",
+
+    # down3 → model.1.submodule.1.submodule.1.submodule.0 (encoder block 4)
+    "backbone.down3.maxpool_conv.1.double_conv.0.weight": "model.1.submodule.1.submodule.1.submodule.0.conv.0.conv.weight",
+    "backbone.down3.maxpool_conv.1.double_conv.0.bias":   "model.1.submodule.1.submodule.1.submodule.0.conv.0.conv.bias",
+    "backbone.down3.maxpool_conv.1.double_conv.1.weight": "model.1.submodule.1.submodule.1.submodule.0.conv.0.adn.N.weight",
+    "backbone.down3.maxpool_conv.1.double_conv.1.bias":   "model.1.submodule.1.submodule.1.submodule.0.conv.0.adn.N.bias",
+    "backbone.down3.maxpool_conv.1.double_conv.3.weight": "model.1.submodule.1.submodule.1.submodule.0.conv.1.conv.weight",
+    "backbone.down3.maxpool_conv.1.double_conv.3.bias":   "model.1.submodule.1.submodule.1.submodule.0.conv.1.conv.bias",
+    "backbone.down3.maxpool_conv.1.double_conv.4.weight": "model.1.submodule.1.submodule.1.submodule.0.conv.1.adn.N.weight",
+    "backbone.down3.maxpool_conv.1.double_conv.4.bias":   "model.1.submodule.1.submodule.1.submodule.0.conv.1.adn.N.bias",
+
+    # down4 → model.1.submodule.1.submodule.1.submodule.1.submodule (bottleneck)
+    "backbone.down4.maxpool_conv.1.double_conv.0.weight": "model.1.submodule.1.submodule.1.submodule.1.submodule.conv.0.conv.weight",
+    "backbone.down4.maxpool_conv.1.double_conv.0.bias":   "model.1.submodule.1.submodule.1.submodule.1.submodule.conv.0.conv.bias",
+    "backbone.down4.maxpool_conv.1.double_conv.1.weight": "model.1.submodule.1.submodule.1.submodule.1.submodule.conv.0.adn.N.weight",
+    "backbone.down4.maxpool_conv.1.double_conv.1.bias":   "model.1.submodule.1.submodule.1.submodule.1.submodule.conv.0.adn.N.bias",
+    "backbone.down4.maxpool_conv.1.double_conv.3.weight": "model.1.submodule.1.submodule.1.submodule.1.submodule.conv.1.conv.weight",
+    "backbone.down4.maxpool_conv.1.double_conv.3.bias":   "model.1.submodule.1.submodule.1.submodule.1.submodule.conv.1.conv.bias",
+    "backbone.down4.maxpool_conv.1.double_conv.4.weight": "model.1.submodule.1.submodule.1.submodule.1.submodule.conv.1.adn.N.weight",
+    "backbone.down4.maxpool_conv.1.double_conv.4.bias":   "model.1.submodule.1.submodule.1.submodule.1.submodule.conv.1.adn.N.bias",
+}
+
 def load_ssl_encoder(model, ssl_ckpt_path, device):
     """
     Load COVER SSL pretrained encoder weights into AttentionUnet encoder.
-    Uses strict=False — only matching layers are loaded.
+    Uses an explicit layer-by-layer mapping derived from printing both
+    models' named_parameters(). Maps all 5 encoder blocks (inc + down1-4).
     """
     print(f"Loading SSL encoder from {ssl_ckpt_path} ...")
-    ckpt = torch.load(ssl_ckpt_path, map_location=device)
+    ckpt        = torch.load(ssl_ckpt_path, map_location=device)
     ssl_weights = ckpt.get("state_dict", ckpt)
+    ssl_weights = {k.replace("module.", ""): v for k, v in ssl_weights.items()}
 
-    # Strip 'backbone.' prefix if present
-    encoder_weights = {
-        k.replace("backbone.", "").replace("module.", ""): v
-        for k, v in ssl_weights.items()
-        if "backbone" in k or "encoder" in k
-    }
+    att_state = model.state_dict()
+    loaded, skipped = 0, 0
 
-    matched = model.load_state_dict(encoder_weights, strict=False)
-    print(f"  Loaded  : {len(encoder_weights) - len(matched.missing_keys)} layers")
-    print(f"  Missing : {len(matched.missing_keys)} layers (decoder — expected)")
-    print(f"  Unexpected: {len(matched.unexpected_keys)} layers")
+    for cover_key, att_key in COVER_TO_ATTUNET.items():
+        if cover_key in ssl_weights and att_key in att_state:
+            src = ssl_weights[cover_key]
+            dst = att_state[att_key]
+            if src.shape == dst.shape:
+                att_state[att_key] = src
+                loaded += 1
+            else:
+                print(f"  ⚠️  Shape mismatch: {cover_key} {src.shape} → {att_key} {dst.shape}")
+                skipped += 1
+        else:
+            missing = cover_key if cover_key not in ssl_weights else att_key
+            print(f"  ⚠️  Key not found: {missing}")
+            skipped += 1
+
+    model.load_state_dict(att_state)
+    print(f"  Loaded : {loaded}/{len(COVER_TO_ATTUNET)} encoder layers ✅")
+    if skipped > 0:
+        print(f"  Skipped: {skipped} layers")
     return model
 
 # ─── CHECKPOINT ───────────────────────────────────────────────────────────────
