@@ -43,11 +43,11 @@ if not os.path.exists('/content/Brain_aneurysm_segmentation'):
 # ─── CELL 1 — Setup ───────────────────────────────────────────────────────────
 # Adjust paths as needed
 
-SSL_CHECKPOINT = '/content/drive/MyDrive/model_final_best.pth.tar'
-NPZ_PATH       = '/content/drive/MyDrive/CoW_preprocessed.npz'
+SSL_CHECKPOINT = '/content/drive/MyDrive/visualisation_ssl/model_final_best.pth.tar'
+NPZ_PATH       = '/content/drive/MyDrive/visualisation_ssl/CoW_preprocessed.npz'
 COVER_PATH     = '/content/Brain_aneurysm_segmentation/COVER'
-CSV_PATH       = '/content/drive/MyDrive/COVER_2D_CoW.csv'
-OUTPUT_DIR     = '/content/drive/MyDrive/CoW_visualizations'
+CSV_PATH       = '/content/drive/MyDrive/visualisation_ssl/COVER_2D_CoW.csv'
+OUTPUT_DIR     = '/content/drive/MyDrive/visualisation_ssl/CoW_visualizations'
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 sys.path.insert(0, COVER_PATH)
