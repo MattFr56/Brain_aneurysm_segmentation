@@ -21,6 +21,13 @@ from utils.Transform_2d import CropTransform
 from utils.dataloader_SSP_2d import DatasetFromFolder2D, pack_to_npz
 from utils.losses import partical_MAE, partical_COS
 import numpy as np
+
+# Optional — Kaggle dataset backup (only active if kagglehub is available)
+try:
+    import kagglehub
+    KAGGLEHUB_AVAILABLE = True
+except ImportError:
+    KAGGLEHUB_AVAILABLE = False
 from tqdm import tqdm
 
 parser = argparse.ArgumentParser(description="COVER 2D SSL Pretraining")
@@ -36,6 +43,13 @@ parser.add_argument("-npz_path",
                     default="/content/drive/MyDrive/CoW_preprocessed.npz",
                     help="path to packed .npz archive (faster) — used automatically "
                          "if the file exists, falls back to -preprocessed_dir otherwise")
+parser.add_argument("-kaggle_dataset",
+                    default="",
+                    help="Kaggle dataset handle for checkpoint backup "
+                         "e.g. 'yourusername/cow-checkpoints'. "
+                         "If set, checkpoints are uploaded every --backup_every epochs.")
+parser.add_argument("--backup_every", default=5, type=int,
+                    help="backup checkpoints to Kaggle dataset every N epochs (default 5)")
 parser.add_argument("-save_dir", metavar="SAVE", default="/content/drive/MyDrive/CoW_checkpoints",
                     help="directory to save checkpoints (use Google Drive path on Colab)")  # FIX 7
 parser.add_argument("-j", "--workers", default=2, type=int, metavar="N",
@@ -305,6 +319,21 @@ def main_worker(gpu, args):
             train_batch_time_log, train_data_time_log, train_loss_vec_log, train_loss_con_log,
             val_batch_time_log,   val_data_time_log,   val_loss_vec_log,   val_loss_con_log,
         ])
+
+        # ── Kaggle dataset backup every N epochs ──────────────────────────────
+        if (KAGGLEHUB_AVAILABLE
+                and args.kaggle_dataset
+                and (epoch + 1) % args.backup_every == 0):
+            try:
+                print(f"Backing up checkpoints to {args.kaggle_dataset} ...")
+                kagglehub.dataset_upload(
+                    args.kaggle_dataset,
+                    args.save_dir,
+                    version_notes=f"epoch {epoch + 1}"
+                )
+                print("✅ Backup complete")
+            except Exception as e:
+                print(f"⚠️  Backup failed (training continues): {e}")
 
         print(f"Epoch [{epoch + 1}/{args.epochs}]")
         print(f"Train Loss - Vector: {train_loss_vec_log:.4f}, Contrast: {train_loss_con_log:.4f}")
