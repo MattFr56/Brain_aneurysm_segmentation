@@ -156,11 +156,11 @@ def preprocess_volumes_to_npz(image_dir, mask_dir, npz_path,
     import cv2
 
     # Build pairs
-    image_files = sorted(glob.glob(os.path.join(image_dir, "*_0000.nii.gz")))
+    image_files = sorted(glob.glob(os.path.join(image_dir, "*_0000.nii*")))
     pairs = []
     for img_path in image_files:
         stem     = os.path.basename(img_path).replace("_0000.nii.gz", "")
-        msk_path = os.path.join(mask_dir, stem + ".nii.gz")
+        msk_path = os.path.join(mask_dir, stem + ".nii") if os.path.isfile(os.path.join(mask_dir, stem + ".nii")) else os.path.join(mask_dir, stem + ".nii.gz")
         if os.path.isfile(msk_path):
             pairs.append((img_path, msk_path, stem))
         else:
