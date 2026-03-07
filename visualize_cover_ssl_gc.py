@@ -21,23 +21,32 @@ import os
 import sys
 
 # ─── CELL 0 — Mount Drive ─────────────────────────────────────────────────────
-from google.colab import drive
-drive.mount('/content/drive')
+# NOTE: Drive must be mounted BEFORE running this script.
+# In your Colab notebook, run this in a separate cell first:
+#   from google.colab import drive
+#   drive.mount('/content/drive')
+
+import os
+if not os.path.exists('/content/drive/MyDrive'):
+    raise RuntimeError(
+        "Google Drive is not mounted!\n"
+        "Run this in a Colab cell first:\n"
+        "  from google.colab import drive\n"
+        "  drive.mount('/content/drive')"
+    )
 
 # Clone repo if not already present
-import os
-if not os.path.exists('/content/main/Brain_aneurysm_segmentation'):
-    os.makedirs('/content/main', exist_ok=True)
+if not os.path.exists('/content/Brain_aneurysm_segmentation'):
     os.system('git clone https://github.com/MattFr56/Brain_aneurysm_segmentation.git '
-              '/content/main/Brain_aneurysm_segmentation')
+              '/content/Brain_aneurysm_segmentation')
 
 # ─── CELL 1 — Setup ───────────────────────────────────────────────────────────
 # Adjust paths as needed
 
-SSL_CHECKPOINT = '/content/model_final_best.pth.tar'
-NPZ_PATH       = '/content/CoW_preprocessed.npz'
-COVER_PATH     = '/content/Brain_aneurysm_segmentation/COVER'
-CSV_PATH       = '/content/COVER_2D_CoW.csv'
+SSL_CHECKPOINT = '/content/drive/MyDrive/model_final_best.pth.tar'
+NPZ_PATH       = '/content/drive/MyDrive/CoW_preprocessed.npz'
+COVER_PATH     = '/content/main/Brain_aneurysm_segmentation/COVER'
+CSV_PATH       = '/content/drive/MyDrive/COVER_2D_CoW.csv'
 OUTPUT_DIR     = '/content/drive/MyDrive/CoW_visualizations'
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
