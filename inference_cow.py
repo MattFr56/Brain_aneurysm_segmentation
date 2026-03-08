@@ -61,7 +61,19 @@ def load_model(checkpoint_path, device):
     ckpt       = torch.load(checkpoint_path, map_location=device)
     state_dict = ckpt.get("state_dict", ckpt)
     state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-    model.load_state_dict(state_dict)
+
+    # Remap MONAI version differences:
+    # older MONAI: sub0/sub1/subconv
+    # newer MONAI: submodule.0/submodule.1/submodule.conv
+    remapped = {}
+    for k, v in state_dict.items():
+        k = k.replace(".sub0.", ".submodule.0.")
+        k = k.replace(".sub1.", ".submodule.1.")
+        k = k.replace(".subconv.", ".submodule.conv.")
+        remapped[k] = v
+    state_dict = remapped
+
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
     print(f"✅ Model loaded")
     return model
