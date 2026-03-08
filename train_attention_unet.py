@@ -74,7 +74,7 @@ def get_args():
     parser.add_argument("-kaggle_dataset", default="",
                         help="Kaggle dataset handle for backup e.g. 'user/cow-seg-checkpoints'")
     parser.add_argument("--backup_every", default=5,  type=int)
-    parser.add_argument("--epochs",       default=120, type=int)
+    parser.add_argument("--epochs",       default=70, type=int)
     parser.add_argument("--batch_size",   default=32,  type=int)
     parser.add_argument("--lr",           default=1e-4, type=float)
     parser.add_argument("--img_size",     default=256,  type=int)
@@ -193,9 +193,8 @@ def preprocess_volumes_to_npz(image_dir, mask_dir, npz_path,
             img_sl = img_vol[:, :, s]
             msk_sl = msk_vol[:, :, s]
 
-            # Skip slices with no vessel pixels (keeps only CoW slices)
-            msk_sl_raw = msk_vol[:, :, s]
-            if (msk_sl_raw > 0).sum() < 10:  # fewer than 10 vessel pixels
+            # Skip truly blank image slices only (no signal at all)
+            if img_sl.max() == 0:
                 skipped += 1
                 continue
 
