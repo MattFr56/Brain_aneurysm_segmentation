@@ -31,7 +31,6 @@ from tqdm import tqdm
 
 import monai
 from monai.data import DataLoader, Dataset
-from monai.losses import DiceLoss
 from monai.metrics import DiceMetric, HausdorffDistanceMetric
 from monai.networks.nets import AttentionUnet
 from monai.transforms import (
@@ -132,28 +131,23 @@ class SoftClDiceLoss(nn.Module):
 # ─── COMBINED LOSS ────────────────────────────────────────────────────────────
 
 class CombinedLoss(nn.Module):
-    def __init__(self, alpha=0.4, pos_weight=10.0):
+    def __init__(self, cldice_weight=0.3, cldice_start_epoch=20):
         super().__init__()
-        # pos_weight=10 — filtered slices have ~10% vessel ratio, mild weighting
-        # DiceLoss handles imbalance naturally, BCE needs explicit weighting
-        self.dice       = monai.losses.DiceLoss(sigmoid=True)
-        self.bce        = nn.BCEWithLogitsLoss(
-                              pos_weight=torch.tensor([pos_weight]))
-        self.cldice     = SoftClDiceLoss()
-        self.alpha      = alpha
-        self.pos_weight = pos_weight
+        # Phase A (epochs 1-20):   DiceLoss only — stable learning from scratch
+        # Phase B (epochs 21-120): 70% Dice + 30% clDice — topology refinement
+        # clDice is unstable when predictions are random noise (early training)
+        self.dice              = monai.losses.DiceLoss(sigmoid=True)
+        self.cldice            = SoftClDiceLoss()
+        self.cldice_weight     = cldice_weight
+        self.cldice_start_epoch = cldice_start_epoch
+        self.current_epoch     = 0  # updated externally each epoch
 
     def forward(self, pred, target):
-        # Move pos_weight to same device as pred
-        if self.bce.pos_weight.device != pred.device:
-            self.bce.pos_weight = self.bce.pos_weight.to(pred.device)
-
         loss_dice = self.dice(pred, target)
-        loss_bce  = self.bce(pred, target)
-        loss_cl   = self.cldice(pred, target)
-
-        # 40% Dice + 20% weighted BCE + 40% clDice
-        return 0.4 * loss_dice + 0.2 * loss_bce + self.alpha * loss_cl
+        if self.current_epoch >= self.cldice_start_epoch:
+            loss_cl = self.cldice(pred, target)
+            return (1 - self.cldice_weight) * loss_dice + self.cldice_weight * loss_cl
+        return loss_dice
 
 # ─── PREPROCESSING ────────────────────────────────────────────────────────────
 
@@ -565,6 +559,9 @@ def main():
                 optimizer, T_max=args.epochs - epoch, eta_min=1e-6)
 
         # ── Train ────────────────────────────────────────────────────────────
+        criterion.current_epoch = epoch  # update phased loss
+        if epoch == 20:
+            print("Loss phase B — adding clDice for topology refinement")
         model.train()
         train_loss = 0.0
         pbar = tqdm(train_loader, desc=f"Train Epoch {epoch+1}/{args.epochs}",
