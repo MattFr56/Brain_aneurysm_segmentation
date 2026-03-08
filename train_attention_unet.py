@@ -132,9 +132,9 @@ class SoftClDiceLoss(nn.Module):
 # ─── COMBINED LOSS ────────────────────────────────────────────────────────────
 
 class CombinedLoss(nn.Module):
-    def __init__(self, alpha=0.4, pos_weight=25.0):
+    def __init__(self, alpha=0.4, pos_weight=10.0):
         super().__init__()
-        # pos_weight=25 — after filtering blank slices vessel ratio ~4%, so 1/0.04=25
+        # pos_weight=10 — filtered slices have ~10% vessel ratio, mild weighting
         # DiceLoss handles imbalance naturally, BCE needs explicit weighting
         self.dice       = monai.losses.DiceLoss(sigmoid=True)
         self.bce        = nn.BCEWithLogitsLoss(
@@ -516,7 +516,7 @@ def main():
             print(f"Phase 1 — encoder frozen, training decoder only")
             return torch.optim.AdamW(
                 [p for p in model.parameters() if p.requires_grad],
-                lr=args.lr * 10)
+                lr=args.lr)
         else:
             # Unfreeze all with differential LR
             for p in model.parameters():
