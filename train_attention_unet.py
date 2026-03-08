@@ -427,19 +427,15 @@ def load_ssl_encoder(model, ssl_ckpt_path, device):
             print(f"  ⚠️  Key not found: {missing}")
             skipped += 1
 
-    model.load_state_dict(att_state)
+    model.load_state_dict(att_state, strict=False)
     print(f"  Loaded : {loaded}/{len(COVER_TO_ATTUNET)} encoder layers ✅")
     if skipped > 0:
         print(f"  Skipped: {skipped} layers")
 
-    # Adapt first conv: SSL was trained with 1 input channel,
-    # 2.5D model expects 3 channels → average-replicate the weights
-    with torch.no_grad():
-        w = model.model[0].conv[0].conv.weight  # (out_ch, 1, kH, kW)
-        model.model[0].conv[0].conv.weight = nn.Parameter(
-            w.repeat(1, 3, 1, 1) / 3.0         # (out_ch, 3, kH, kW)
-        )
-    print("  First conv adapted: 1ch → 3ch (weights averaged) ✅")
+    # First conv is NOT transferred from SSL (1ch → 3ch mismatch)
+    # It stays randomly initialized and will be trained from scratch
+    # All deeper encoder layers (down1-4) are transferred ✅
+    print("  Note: first conv randomly initialized (1ch→3ch incompatible)")
     return model
 
 # ─── CHECKPOINT ───────────────────────────────────────────────────────────────
