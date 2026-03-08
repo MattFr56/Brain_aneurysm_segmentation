@@ -222,28 +222,62 @@ def preprocess_volumes_to_npz(image_dir, mask_dir, npz_path,
 
 # ─── DATASET ──────────────────────────────────────────────────────────────────
 
-class SliceDataset(torch.utils.data.Dataset):
-    """
-    Loads 2D image/mask slice pairs from a shared .npz cache.
-    Applies augmentation on GPU if augment=True.
-    """
-    def __init__(self, keys, cache, img_size=256, augment=False):
-        self.keys     = keys
-        self.cache    = cache
-        self.img_size = img_size
-        self.augment  = augment
+import nibabel as nib
+from torch.utils.data import Dataset
+
+class SliceDataset25D(Dataset):
+
+    def __init__(self, image_paths, mask_paths, img_size=256):
+
+        self.volumes = []
+        self.masks = []
+        self.index_map = []
+
+        for i, (img_p, mask_p) in enumerate(zip(image_paths, mask_paths)):
+
+            vol = nib.load(img_p).get_fdata().astype(np.float32)
+            mask = nib.load(mask_p).get_fdata().astype(np.float32)
+
+            vol = (vol - vol.mean()) / (vol.std() + 1e-6)
+
+            self.volumes.append(vol)
+            self.masks.append(mask)
+
+            for z in range(1, vol.shape[2]-1):
+
+                # vessel-aware sampling
+                if mask[:, :, z].sum() > 10:
+                    self.index_map.append((i, z))
+                else:
+                    if np.random.rand() < 0.2:
+                        self.index_map.append((i, z))
 
     def __len__(self):
-        return len(self.keys)
+        return len(self.index_map)
 
     def __getitem__(self, idx):
-        key = self.keys[idx]
-        img = torch.from_numpy(
-            self.cache[f"img_{key}"].astype(np.float32)).unsqueeze(0)  # (1,H,W)
-        msk = torch.from_numpy(
-            self.cache[f"msk_{key}"].astype(np.float32)).unsqueeze(0)  # (1,H,W)
-        return img, msk
 
+        vol_id, z = self.index_map[idx]
+
+        vol = self.volumes[vol_id]
+        mask = self.masks[vol_id]
+
+        z0 = z-1
+        z1 = z
+        z2 = z+1
+
+        img = np.stack([
+            vol[:, :, z0],
+            vol[:, :, z1],
+            vol[:, :, z2]
+        ], axis=0)
+
+        seg = mask[:, :, z1][None]
+
+        img = torch.tensor(img, dtype=torch.float32)
+        seg = torch.tensor(seg, dtype=torch.float32)
+
+        return img, seg
 # ─── GPU AUGMENTATION ─────────────────────────────────────────────────────────
 
 def gpu_augment(img, msk, device):
@@ -471,7 +505,7 @@ def main():
     # ── Model ────────────────────────────────────────────────────────────────
     model = AttentionUnet(
         spatial_dims=2,
-        in_channels=1,
+        in_channels=3,   # 2.5D
         out_channels=1,
         channels=(32, 64, 128, 256, 512),
         strides=(2, 2, 2, 2),
@@ -481,8 +515,19 @@ def main():
     print(f"Model parameters: {total_params / 1e6:.2f} M")
 
     # Load SSL encoder weights if provided
-    if args.ssl_checkpoint and os.path.isfile(args.ssl_checkpoint):
-        model = load_ssl_encoder(model, args.ssl_checkpoint, device)
+    if args.ssl_checkpoint != "":
+    ckpt = torch.load(args.ssl_checkpoint, map_location="cpu")
+
+    model.load_state_dict(ckpt, strict=False)
+
+    print("Loaded SSL encoder weights")
+
+    # adapt first conv for 3 channels
+    w = model.model[0].conv.conv.weight
+
+    model.model[0].conv.conv.weight = torch.nn.Parameter(
+        w.repeat(1,3,1,1) / 3
+    )
 
     # ── Loss + Metrics ───────────────────────────────────────────────────────
     criterion    = CombinedLoss(cldice_weight=0.3, cldice_start_epoch=20).to(device)
