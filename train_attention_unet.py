@@ -132,9 +132,9 @@ class SoftClDiceLoss(nn.Module):
 # ─── COMBINED LOSS ────────────────────────────────────────────────────────────
 
 class CombinedLoss(nn.Module):
-    def __init__(self, alpha=0.4, pos_weight=150.0):
+    def __init__(self, alpha=0.4, pos_weight=25.0):
         super().__init__()
-        # pos_weight=150 accounts for ~0.05% vessel ratio (1/0.0005=2000, capped at 150)
+        # pos_weight=25 — after filtering blank slices vessel ratio ~4%, so 1/0.04=25
         # DiceLoss handles imbalance naturally, BCE needs explicit weighting
         self.dice       = monai.losses.DiceLoss(sigmoid=True)
         self.bce        = nn.BCEWithLogitsLoss(
@@ -199,8 +199,9 @@ def preprocess_volumes_to_npz(image_dir, mask_dir, npz_path,
             img_sl = img_vol[:, :, s]
             msk_sl = msk_vol[:, :, s]
 
-            # Skip blank slices
-            if img_sl.max() == 0:
+            # Skip slices with no vessel pixels (keeps only CoW slices)
+            msk_sl_raw = msk_vol[:, :, s]
+            if (msk_sl_raw > 0).sum() < 10:  # fewer than 10 vessel pixels
                 skipped += 1
                 continue
 
