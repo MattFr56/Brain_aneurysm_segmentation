@@ -1,8 +1,8 @@
 """
-Attention U-Net 2D — Circle of Willis Segmentation
+Attention U-Net 2.5D — Circle of Willis Segmentation
 ====================================================
 - Input  : NIfTI CTA volumes (imagesTr/) + binary masks (labelsTr/)
-- Model  : MONAI AttentionUnet 2D, optionally initialised from COVER SSL checkpoint
+- Model  : MONAI AttentionUnet 2.5D (3-channel input: slice s-1, s, s+1)
 - Loss   : DiceCELoss + soft clDice
 - Metrics: Dice + Hausdorff95
 - Output : best checkpoint + CSV loss log + kagglehub backup
@@ -67,10 +67,10 @@ def get_args():
     parser.add_argument("-save_dir",   default="/kaggle/working/seg_checkpoints",
                         help="where to save checkpoints and logs")
     parser.add_argument("-npz_path",   default="",
-                        help="path to preprocessed .npz (if already done)")
+                        help="(unused in 2.5D mode — volumes loaded directly)")
     parser.add_argument("-ssl_checkpoint", default="",
                         help="path to COVER SSL checkpoint for encoder init")
-    parser.add_argument("-modelname",  default="AttUNet_CoW")
+    parser.add_argument("-modelname",  default="AttUNet25D_CoW")
     parser.add_argument("-kaggle_dataset", default="",
                         help="Kaggle dataset handle for backup e.g. 'user/cow-seg-checkpoints'")
     parser.add_argument("--backup_every", default=5,  type=int)
@@ -223,61 +223,84 @@ def preprocess_volumes_to_npz(image_dir, mask_dir, npz_path,
 # ─── DATASET ──────────────────────────────────────────────────────────────────
 
 import nibabel as nib
-from torch.utils.data import Dataset
+import cv2
+from torch.utils.data import Dataset as TorchDataset
 
-class SliceDataset25D(Dataset):
+class SliceDataset25D(TorchDataset):
+    """
+    2.5D dataset: each sample is 3 consecutive axial slices (s-1, s, s+1)
+    stacked as channels. Target is the mask of the central slice s.
 
-    def __init__(self, image_paths, mask_paths, img_size=256):
+    Vessel-aware sampling:
+      - All slices with >=10 vessel pixels are always included
+      - 20% of background slices are randomly included for bone context
+    """
 
-        self.volumes = []
-        self.masks = []
-        self.index_map = []
+    def __init__(self, vol_mask_pairs, img_size=256,
+                 hu_min=100, hu_max=500, augment=False):
+        """
+        vol_mask_pairs: list of (img_path, mask_path, stem) tuples
+        """
+        self.img_size = img_size
+        self.hu_min   = hu_min
+        self.hu_max   = hu_max
+        self.augment  = augment
+        self.volumes  = []   # list of preprocessed 3D numpy arrays (H, W, D)
+        self.masks    = []   # list of binary 3D numpy arrays (H, W, D)
+        self.index_map = []  # list of (vol_idx, z) tuples
 
-        for i, (img_p, mask_p) in enumerate(zip(image_paths, mask_paths)):
+        for vol_idx, (img_path, msk_path, stem) in enumerate(vol_mask_pairs):
+            img_vol = nib.load(img_path).get_fdata().astype(np.float32)
+            msk_vol = (nib.load(msk_path).get_fdata() > 0).astype(np.float32)
 
-            vol = nib.load(img_p).get_fdata().astype(np.float32)
-            mask = nib.load(mask_p).get_fdata().astype(np.float32)
+            # HU windowing per slice + resize
+            H, W, D = img_vol.shape
+            img_pre = np.zeros((img_size, img_size, D), dtype=np.float16)
+            msk_pre = np.zeros((img_size, img_size, D), dtype=np.float16)
 
-            vol = (vol - vol.mean()) / (vol.std() + 1e-6)
+            for s in range(D):
+                sl = np.clip(img_vol[:, :, s], hu_min, hu_max)
+                sl = (sl - hu_min) / (hu_max - hu_min)
+                img_pre[:, :, s] = cv2.resize(
+                    sl, (img_size, img_size),
+                    interpolation=cv2.INTER_LINEAR).astype(np.float16)
+                msk_pre[:, :, s] = cv2.resize(
+                    msk_vol[:, :, s], (img_size, img_size),
+                    interpolation=cv2.INTER_NEAREST).astype(np.float16)
 
-            self.volumes.append(vol)
-            self.masks.append(mask)
+            self.volumes.append(img_pre)
+            self.masks.append(msk_pre)
 
-            for z in range(1, vol.shape[2]-1):
+            # Build index map — skip first and last slice (no triplet possible)
+            for z in range(1, D - 1):
+                vessel_count = msk_pre[:, :, z].sum()
+                if vessel_count >= 10:
+                    self.index_map.append((vol_idx, z))
+                elif np.random.rand() < 0.2:
+                    # Keep 20% of background slices for bone context
+                    self.index_map.append((vol_idx, z))
 
-                # vessel-aware sampling
-                if mask[:, :, z].sum() > 10:
-                    self.index_map.append((i, z))
-                else:
-                    if np.random.rand() < 0.2:
-                        self.index_map.append((i, z))
+        print(f"  Dataset: {len(self.index_map)} samples from "
+              f"{len(vol_mask_pairs)} volumes")
 
     def __len__(self):
         return len(self.index_map)
 
     def __getitem__(self, idx):
+        vol_idx, z = self.index_map[idx]
+        vol  = self.volumes[vol_idx]
+        mask = self.masks[vol_idx]
 
-        vol_id, z = self.index_map[idx]
-
-        vol = self.volumes[vol_id]
-        mask = self.masks[vol_id]
-
-        z0 = z-1
-        z1 = z
-        z2 = z+1
-
+        # Stack 3 consecutive slices as channels (2.5D)
         img = np.stack([
-            vol[:, :, z0],
-            vol[:, :, z1],
-            vol[:, :, z2]
-        ], axis=0)
+            vol[:, :, z - 1].astype(np.float32),
+            vol[:, :, z    ].astype(np.float32),
+            vol[:, :, z + 1].astype(np.float32),
+        ], axis=0)  # (3, H, W)
 
-        seg = mask[:, :, z1][None]
+        seg = mask[:, :, z].astype(np.float32)[None]  # (1, H, W)
 
-        img = torch.tensor(img, dtype=torch.float32)
-        seg = torch.tensor(seg, dtype=torch.float32)
-
-        return img, seg
+        return torch.from_numpy(img), torch.from_numpy(seg)
 # ─── GPU AUGMENTATION ─────────────────────────────────────────────────────────
 
 def gpu_augment(img, msk, device):
@@ -310,7 +333,8 @@ def gpu_augment(img, msk, device):
     msk  = F.grid_sample(msk, grid, mode='nearest',
                          padding_mode='zeros', align_corners=True)
 
-    # Appearance augmentation on image only
+    # Appearance augmentation — applied uniformly across all 3 channels
+    # (same scanner/contrast for all 3 slices in a triplet)
     gamma = 0.7 + torch.rand(B, 1, 1, 1, device=device) * 0.6
     img   = img.clamp(1e-6).pow(gamma)
     noise = torch.randn_like(img) * torch.rand(1, device=device) * 0.04
@@ -407,6 +431,15 @@ def load_ssl_encoder(model, ssl_ckpt_path, device):
     print(f"  Loaded : {loaded}/{len(COVER_TO_ATTUNET)} encoder layers ✅")
     if skipped > 0:
         print(f"  Skipped: {skipped} layers")
+
+    # Adapt first conv: SSL was trained with 1 input channel,
+    # 2.5D model expects 3 channels → average-replicate the weights
+    with torch.no_grad():
+        w = model.model[0].conv[0].conv.weight  # (out_ch, 1, kH, kW)
+        model.model[0].conv[0].conv.weight = nn.Parameter(
+            w.repeat(1, 3, 1, 1) / 3.0         # (out_ch, 3, kH, kW)
+        )
+    print("  First conv adapted: 1ch → 3ch (weights averaged) ✅")
     return model
 
 # ─── CHECKPOINT ───────────────────────────────────────────────────────────────
@@ -455,45 +488,40 @@ def main():
                           if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # ── Preprocessing ────────────────────────────────────────────────────────
-    if args.npz_path and os.path.isfile(args.npz_path):
-        print(f"Loading preprocessed data from {args.npz_path} ...")
-    else:
-        npz_path = os.path.join(args.save_dir, "seg_preprocessed.npz")
-        print("Preprocessing volumes ...")
-        preprocess_volumes_to_npz(
-            args.image_dir, args.mask_dir, npz_path,
-            img_size=args.img_size)
-        args.npz_path = npz_path
-
-    # Load shared cache
-    print("Loading .npz into RAM ...")
-    npz         = np.load(args.npz_path)
-    all_img_keys = sorted([k.replace("img_", "") for k in npz.files
-                            if k.startswith("img_")])
-    shared_cache = {k: npz[k] for k in npz.files}
-    npz.close()
-    ram_gb = sum(v.nbytes for v in shared_cache.values()) / 1e9
-    print(f"  {len(all_img_keys)} slices — {ram_gb:.2f} GB in RAM")
+    # ── Build volume pairs ───────────────────────────────────────────────────
+    print("Scanning image/mask pairs ...")
+    image_files = sorted(glob.glob(os.path.join(args.image_dir, "*_0000.nii*")))
+    all_pairs = []
+    for img_path in image_files:
+        basename = os.path.basename(img_path)
+        stem     = basename.replace("_0000.nii.gz", "").replace("_0000.nii", "")
+        msk_path = os.path.join(args.mask_dir, stem + ".nii")
+        if not os.path.isfile(msk_path):
+            msk_path = os.path.join(args.mask_dir, stem + ".nii.gz")
+        if os.path.isfile(msk_path):
+            all_pairs.append((img_path, msk_path, stem))
+        else:
+            print(f"  ⚠️  No mask found for {stem} — skipping")
+    print(f"Found {len(all_pairs)} image/mask pairs")
 
     # Patient-level train/val split
-    patients     = sorted(set("_".join(k.split("_")[:3]) for k in all_img_keys))
-    train_pats, val_pats = train_test_split(patients, test_size=0.2, random_state=42)
-    train_pats   = set(train_pats)
+    patients = sorted(set(p[2] for p in all_pairs))
+    train_pats, val_pats = train_test_split(
+        patients, test_size=0.2, random_state=42)
+    train_pats = set(train_pats)
+    val_pats   = set(val_pats)
 
-    train_keys = [k for k in all_img_keys
-                  if "_".join(k.split("_")[:3]) in train_pats]
-    val_keys   = [k for k in all_img_keys
-                  if "_".join(k.split("_")[:3]) not in train_pats]
+    train_pairs = [p for p in all_pairs if p[2] in train_pats]
+    val_pairs   = [p for p in all_pairs if p[2] in val_pats]
+    print(f"  Train: {len(train_pairs)} volumes | Val: {len(val_pairs)} volumes")
 
-    print(f"  Train: {len(train_keys)} slices ({len(train_pats)} patients)")
-    print(f"  Val  : {len(val_keys)} slices ({len(val_pats)} patients)")
-
-    # Datasets + loaders
-    train_ds = SliceDataset(train_keys, shared_cache,
-                            img_size=args.img_size, augment=True)
-    val_ds   = SliceDataset(val_keys,   shared_cache,
-                            img_size=args.img_size, augment=False)
+    # Build 2.5D datasets — loads and preprocesses volumes into RAM
+    print("Building train dataset (preprocessing volumes into RAM) ...")
+    train_ds = SliceDataset25D(train_pairs, img_size=args.img_size,
+                               hu_min=100, hu_max=500, augment=True)
+    print("Building val dataset ...")
+    val_ds   = SliceDataset25D(val_pairs,   img_size=args.img_size,
+                               hu_min=100, hu_max=500, augment=False)
 
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
                               shuffle=True,  num_workers=args.workers,
@@ -515,19 +543,8 @@ def main():
     print(f"Model parameters: {total_params / 1e6:.2f} M")
 
     # Load SSL encoder weights if provided
-    if args.ssl_checkpoint != "":
-    ckpt = torch.load(args.ssl_checkpoint, map_location="cpu")
-
-    model.load_state_dict(ckpt, strict=False)
-
-    print("Loaded SSL encoder weights")
-
-    # adapt first conv for 3 channels
-    w = model.model[0].conv.conv.weight
-
-    model.model[0].conv.conv.weight = torch.nn.Parameter(
-        w.repeat(1,3,1,1) / 3
-    )
+    if args.ssl_checkpoint and os.path.isfile(args.ssl_checkpoint):
+        model = load_ssl_encoder(model, args.ssl_checkpoint, device)
 
     # ── Loss + Metrics ───────────────────────────────────────────────────────
     criterion    = CombinedLoss(cldice_weight=0.3, cldice_start_epoch=20).to(device)
@@ -570,8 +587,9 @@ def main():
             ])
 
     optimizer = get_optimizer(phase=1 if args.ssl_checkpoint else 2)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs, eta_min=1e-6)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=5,
+        min_lr=1e-6, verbose=True)
 
     # ── Resume from checkpoint ───────────────────────────────────────────────
     start_epoch = 0
@@ -599,8 +617,9 @@ def main():
         # Switch to phase 2 after freeze_epochs
         if args.ssl_checkpoint and epoch == args.freeze_epochs:
             optimizer = get_optimizer(phase=2)
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer, T_max=args.epochs - epoch, eta_min=1e-6)
+            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+                optimizer, mode='min', factor=0.5, patience=5,
+                min_lr=1e-6, verbose=True)
 
         # ── Train ────────────────────────────────────────────────────────────
         criterion.current_epoch = epoch  # update phased loss
@@ -630,7 +649,6 @@ def main():
             pbar.set_postfix(loss=f"{loss.item():.4f}")
 
         train_loss /= len(train_loader)
-        scheduler.step()
 
         # ── Validate ─────────────────────────────────────────────────────────
         val_loss = 0.0
@@ -669,6 +687,7 @@ def main():
             print(f"  Val Dice   : {val_dice:.4f}  (best: {best_dice:.4f})")
             print(f"  Val HD95   : {val_hd95:.2f} mm")
 
+            scheduler.step(val_loss)
             logwriter.write([epoch+1, train_loss, val_loss,
                              val_dice, val_hd95])
 
