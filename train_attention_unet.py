@@ -486,7 +486,7 @@ def main():
         model = load_ssl_encoder(model, args.ssl_checkpoint, device)
 
     # ── Loss + Metrics ───────────────────────────────────────────────────────
-    criterion    = CombinedLoss(alpha=0.4).to(device)
+    criterion    = CombinedLoss(cldice_weight=0.3, cldice_start_epoch=20).to(device)
     dice_metric  = DiceMetric(include_background=False, reduction="mean")
     hd95_metric  = HausdorffDistanceMetric(include_background=False,
                                            percentile=95, reduction="mean")
