@@ -589,7 +589,7 @@ def main():
     optimizer = get_optimizer(phase=1 if args.ssl_checkpoint else 2)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=5,
-        min_lr=1e-6, verbose=True)
+        min_lr=1e-6)
 
     # ── Resume from checkpoint ───────────────────────────────────────────────
     start_epoch = 0
@@ -619,7 +619,7 @@ def main():
             optimizer = get_optimizer(phase=2)
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
                 optimizer, mode='min', factor=0.5, patience=5,
-                min_lr=1e-6, verbose=True)
+                min_lr=1e-6)
 
         # ── Train ────────────────────────────────────────────────────────────
         criterion.current_epoch = epoch  # update phased loss
