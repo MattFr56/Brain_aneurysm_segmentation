@@ -31,7 +31,7 @@ from tqdm import tqdm
 
 import monai
 from monai.data import DataLoader, Dataset
-from monai.losses import DiceCELoss
+from monai.losses import DiceLoss
 from monai.metrics import DiceMetric, HausdorffDistanceMetric
 from monai.networks.nets import AttentionUnet
 from monai.transforms import (
@@ -132,16 +132,28 @@ class SoftClDiceLoss(nn.Module):
 # ─── COMBINED LOSS ────────────────────────────────────────────────────────────
 
 class CombinedLoss(nn.Module):
-    def __init__(self, alpha=0.5):
+    def __init__(self, alpha=0.4, pos_weight=150.0):
         super().__init__()
-        self.dice_ce = DiceCELoss(sigmoid=True, lambda_dice=0.5, lambda_ce=0.5)
-        self.cldice  = SoftClDiceLoss()
-        self.alpha   = alpha  # weight for clDice
+        # pos_weight=150 accounts for ~0.05% vessel ratio (1/0.0005=2000, capped at 150)
+        # DiceLoss handles imbalance naturally, BCE needs explicit weighting
+        self.dice       = monai.losses.DiceLoss(sigmoid=True)
+        self.bce        = nn.BCEWithLogitsLoss(
+                              pos_weight=torch.tensor([pos_weight]))
+        self.cldice     = SoftClDiceLoss()
+        self.alpha      = alpha
+        self.pos_weight = pos_weight
 
     def forward(self, pred, target):
-        loss_dice_ce = self.dice_ce(pred, target)
-        loss_cl      = self.cldice(pred, target)
-        return (1 - self.alpha) * loss_dice_ce + self.alpha * loss_cl
+        # Move pos_weight to same device as pred
+        if self.bce.pos_weight.device != pred.device:
+            self.bce.pos_weight = self.bce.pos_weight.to(pred.device)
+
+        loss_dice = self.dice(pred, target)
+        loss_bce  = self.bce(pred, target)
+        loss_cl   = self.cldice(pred, target)
+
+        # 40% Dice + 20% weighted BCE + 40% clDice
+        return 0.4 * loss_dice + 0.2 * loss_bce + self.alpha * loss_cl
 
 # ─── PREPROCESSING ────────────────────────────────────────────────────────────
 
@@ -643,7 +655,9 @@ def main():
                     )
                     print("✅ Backup complete")
                 except Exception as e:
-                    print(f"⚠️  Backup failed (training continues): {e}")
+                    print(f"\u26a0\ufe0f  Backup failed: {type(e).__name__}: {e}")
+                    print(f"   Make sure '{args.kaggle_dataset}' exists on kaggle.com/datasets")
+                    print(f"   Checkpoints still saved locally in {args.save_dir}")
 
     print(f"\nTraining complete — best Dice: {best_dice:.4f}")
 
