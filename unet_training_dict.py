@@ -46,6 +46,7 @@ def get_args():
     return parser.parse_args()
     
 def main():
+    args = get_args()
     monai.config.print_config()
     logging.basicConfig(stream=sys.stdout, level=logging.INFO)
     images = sorted(glob(os.path.join(args.image_dir, "*.nii.gz")))
