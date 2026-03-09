@@ -72,7 +72,7 @@ def main():
             EnsureChannelFirstd(keys=["img", "seg"]),
             ScaleIntensityd(keys="img"),
             Spacingd(keys=['img', 'seg'], pixdim=(1.5, 1.5, 2)),
-            CropForegroundd(keys=['img', 'seg'], source_key='image'),
+            CropForegroundd(keys=['img', 'seg'], source_key='img'),
             RandCropByPosNegLabeld(
                 keys=["img", "seg"], label_key="seg", spatial_size=[96, 96, 96], pos=1, neg=1, num_samples=4
             ),
