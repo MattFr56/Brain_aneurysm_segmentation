@@ -15,6 +15,7 @@ Pairing: strip '_0000' from image stem → mask stem
 """
 
 import argparse
+import re
 import csv
 import gc
 import glob
@@ -510,14 +511,17 @@ def save_checkpoint(state, is_best, save_dir, modelname, keep_last=3):
 # ─── LOG WRITER ───────────────────────────────────────────────────────────────
 
 class LogWriter:
-    def __init__(self, path):
+    def __init__(self, path, resume=False):
         self.path = path + ".csv"
-        with open(self.path, "w", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                "Epoch", "Train Loss", "Val Loss",
-                "Val Dice", "Val Hausdorff95"
-            ])
+        if not resume or not os.path.isfile(self.path):
+            # Fresh start — write header
+            with open(self.path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "Epoch", "Train Loss", "Val Loss",
+                    "Val Dice", "Val Hausdorff95"
+                ])
+        # If resuming and file exists, just append — header already there
 
     def write(self, row):
         with open(self.path, "a", newline="") as f:
@@ -619,11 +623,6 @@ def main():
     if args.ssl_checkpoint and os.path.isfile(args.ssl_checkpoint):
         model = load_ssl_encoder(model, args.ssl_checkpoint, device)
 
-    # Multi-GPU with DataParallel
-    if torch.cuda.device_count() > 1:
-        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
-        model = torch.nn.DataParallel(model)
-
     # ── Loss + Metrics ───────────────────────────────────────────────────────
     criterion    = CombinedLoss(cldice_weight=0.3, cldice_start_epoch=20).to(device)
     # include_background=True is correct for single-channel binary segmentation
@@ -635,6 +634,8 @@ def main():
     # ── Optimizer — two-phase ────────────────────────────────────────────────
     # Phase 1: freeze encoder, train decoder only
     # Phase 2: unfreeze all with differential LR
+    # NOTE: DataParallel wrapping happens AFTER get_optimizer is defined
+    # so named_parameters() uses base model names (no 'module.' prefix)
     def get_optimizer(phase=1):
         if phase == 1:
             # Freeze encoder (first half of model parameters)
@@ -642,7 +643,14 @@ def main():
             encoder_params = []
             decoder_params = []
             for name, p in params:
-                if any(x in name for x in ['encode', 'down', 'input_block']):
+                # AttentionUnet encoder layers: model.0 (inc) + model.1.submodule.*
+                # Decoder layers: model.1.upconv, model.1.merge, model.1.attention
+                # (submodule chain deeper than submodule.0/1 = bottleneck = encoder)
+                is_encoder = (
+                    name.startswith('model.0.') or
+                    re.match(r'model\.1\.submodule\.(0\.|1\.submodule\.(0\.|1\.submodule\.))', name)
+                )
+                if is_encoder:
                     p.requires_grad = False
                     encoder_params.append(p)
                 else:
@@ -654,9 +662,8 @@ def main():
             base = model.module if hasattr(model, 'module') else model
             for name, module in base.named_modules():
                 if isinstance(module, torch.nn.BatchNorm2d):
-                    if any(x in name for x in ['encode', 'down', 'input_block',
-                                                'model.0', 'model.1.submodule.0',
-                                                'model.1.submodule.1']):
+                    if (name.startswith('model.0.') or
+                            re.match(r'model\.1\.submodule\.(0\.|1\.submodule\.(0\.|1\.submodule\.))', name)):
                         module.eval()  # freeze BN stats in encoder
             return torch.optim.AdamW(
                 [p for p in model.parameters() if p.requires_grad],
@@ -668,14 +675,24 @@ def main():
             print(f"Phase 2 — full model unfrozen")
             return torch.optim.AdamW([
                 {'params': [p for n, p in model.named_parameters()
-                            if any(x in n for x in ['encode', 'down'])],
+                            if n.startswith('model.0.') or
+                            bool(re.match(r'model\.1\.submodule\.(0\.|1\.submodule\.(0\.|1\.submodule\.))', n))],
                  'lr': args.lr * 0.1},   # encoder — low LR
                 {'params': [p for n, p in model.named_parameters()
-                            if not any(x in n for x in ['encode', 'down'])],
+                            if not (n.startswith('model.0.') or
+                            bool(re.match(r'model\.1\.submodule\.(0\.|1\.submodule\.(0\.|1\.submodule\.))', n)))],
                  'lr': args.lr},          # decoder — full LR
             ])
 
-    optimizer = get_optimizer(phase=1 if args.ssl_checkpoint else 2)
+    # Detect correct phase (important when resuming mid-training)
+    _initial_phase = 1 if args.ssl_checkpoint else 2
+    optimizer = get_optimizer(phase=_initial_phase)
+
+    # Multi-GPU with DataParallel — AFTER optimizer so param names stay clean
+    if torch.cuda.device_count() > 1:
+        print(f"Using {torch.cuda.device_count()} GPUs with DataParallel")
+        model = torch.nn.DataParallel(model)
+
     # Cosine annealing with warm restarts — escapes local minima
     # T_0=20: first restart at epoch 20, T_mult=2: each cycle doubles
     scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
@@ -687,19 +704,34 @@ def main():
     # ── Resume from checkpoint ───────────────────────────────────────────────
     start_epoch = 0
     best_dice   = 0.0
-    logwriter   = LogWriter(os.path.join(args.save_dir, args.modelname))
 
     ckpt_pattern = os.path.join(args.save_dir,
                                 f"checkpoint_{args.modelname}_*.pth.tar")
     existing_ckpts = sorted(glob.glob(ckpt_pattern))
+    is_resume = bool(existing_ckpts)
+    logwriter  = LogWriter(os.path.join(args.save_dir, args.modelname),
+                           resume=is_resume)
+
     if existing_ckpts:
         ckpt_path  = existing_ckpts[-1]
         print(f"=> loading checkpoint '{ckpt_path}'")
-        ckpt       = torch.load(ckpt_path, map_location=device)
-        model.load_state_dict(ckpt["state_dict"])
-        optimizer.load_state_dict(ckpt["optimizer"])
+        ckpt        = torch.load(ckpt_path, map_location=device)
         start_epoch = ckpt["epoch"]
         best_dice   = ckpt.get("best_dice", 0.0)
+        # Switch to correct phase before loading optimizer state
+        if args.ssl_checkpoint and start_epoch >= args.freeze_epochs:
+            optimizer = get_optimizer(phase=2)
+            print(f"=> resuming in phase 2 (epoch {start_epoch} >= freeze {args.freeze_epochs})")
+        # Handle DataParallel module.* prefix mismatch between save and load
+        saved_state      = ckpt["state_dict"]
+        is_dp            = hasattr(model, "module")
+        has_module_prefix = any(k.startswith("module.") for k in saved_state)
+        if is_dp and not has_module_prefix:
+            saved_state = {"module." + k: v for k, v in saved_state.items()}
+        elif not is_dp and has_module_prefix:
+            saved_state = {k.replace("module.", "", 1): v for k, v in saved_state.items()}
+        model.load_state_dict(saved_state)
+        optimizer.load_state_dict(ckpt["optimizer"])
         print(f"=> resumed from epoch {start_epoch}")
     else:
         print("=> no checkpoint found — starting from scratch")
@@ -725,8 +757,8 @@ def main():
             base = model.module if hasattr(model, 'module') else model
             for name, module in base.named_modules():
                 if isinstance(module, torch.nn.BatchNorm2d):
-                    if any(x in name for x in ['model.0', 'model.1.submodule.0',
-                                                'model.1.submodule.1']):
+                    if (name.startswith('model.0.') or
+                            re.match(r'model\.1\.submodule\.(0\.|1\.submodule\.(0\.|1\.submodule\.))', name)):
                         module.eval()
         train_loss = 0.0
         pbar = tqdm(train_loader, desc=f"Train Epoch {epoch+1}/{args.epochs}",
@@ -772,21 +804,17 @@ def main():
 
                     # TTA — average 4 predictions: original + hflip + vflip + both
                     with torch.cuda.amp.autocast():
-                        p0 = torch.sigmoid(model(img))
-                        p1 = torch.sigmoid(model(torch.flip(img, dims=[-1])))
-                        p1 = torch.flip(p1, dims=[-1])
-                        p2 = torch.sigmoid(model(torch.flip(img, dims=[-2])))
-                        p2 = torch.flip(p2, dims=[-2])
-                        p3 = torch.sigmoid(model(torch.flip(img, dims=[-1, -2])))
-                        p3 = torch.flip(p3, dims=[-1, -2])
+                        pred_logits = model(img)          # logits for loss
+                        p0 = torch.sigmoid(pred_logits)
+                        p1 = torch.flip(torch.sigmoid(model(torch.flip(img, dims=[-1]))), dims=[-1])
+                        p2 = torch.flip(torch.sigmoid(model(torch.flip(img, dims=[-2]))), dims=[-2])
+                        p3 = torch.flip(torch.sigmoid(model(torch.flip(img, dims=[-1,-2]))), dims=[-1,-2])
                         pred_prob = (p0 + p1 + p2 + p3) / 4.0
                         # Multi-scale fusion if enabled
                         if args.multi_scale:
                             ms_pred   = multi_scale_predict(model, img)
                             pred_prob = (pred_prob + ms_pred) / 2.0
-                        # Loss on original only (for monitoring)
-                        pred_raw  = model(img)
-                    val_loss += criterion(pred_raw, msk).item()
+                    val_loss += criterion(pred_logits, msk).item()  # reuse logits
 
                     # Binarise averaged TTA prediction
                     pred_bin = (pred_prob > 0.5).float()
