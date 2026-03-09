@@ -63,7 +63,7 @@ def main():
             EnsureChannelFirstd(keys=["img", "seg"]),
             ScaleIntensityd(keys=["img", "seg"]),
             RandCropByPosNegLabeld(
-                keys=["img", "seg"], label_key="seg", spatial_size=[96, 96], pos=1, neg=1, num_samples=4
+                keys=["img", "seg"], label_key="seg", spatial_size=[96, 96, 96], pos=1, neg=1, num_samples=4
             ),
             RandRotate90d(keys=["img", "seg"], prob=0.5, spatial_axes=[0, 1]),
         ]
