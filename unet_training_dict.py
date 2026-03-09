@@ -21,6 +21,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+from sklearn.model_selection import train_test_split
 
 import monai
 from monai.data import create_test_image_3d, list_data_collate, decollate_batch
