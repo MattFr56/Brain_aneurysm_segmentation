@@ -1,4 +1,4 @@
-# “””
+“””
 Attention U-Net 2.5D — Circle of Willis Segmentation
 
 - Input  : NIfTI CTA volumes (imagesTr/) + binary masks (labelsTr/)
