@@ -51,7 +51,7 @@ def main():
     logging.basicConfig(stream=sys.stdout, level=logging.INFO)
     images = sorted(glob(os.path.join(args.image_dir, "*.nii.gz")))
     segs = sorted(glob(os.path.join(args.mask_dir, "*.nii.gz")))
-    train_images, val_images, train_masks, val_masks = train_test_split(files, masks,
+    train_images, val_images, train_masks, val_masks = train_test_split(images, segs,
                                                                   test_size=0.2, random_state=42)
     train_files = [{"img": img, "seg": seg} for img, seg in zip(train_images, train_masks)]
     val_files = [{"img": img, "seg": seg} for img, seg in zip(val_images, val_masks)]
