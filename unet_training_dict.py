@@ -18,6 +18,7 @@ from glob import glob
 import torch
 from PIL import Image
 from torch.utils.tensorboard import SummaryWriter
+from sklearn.model_selection import train_test_split
 
 import monai
 from monai.data import create_test_image_2d, list_data_collate, decollate_batch, DataLoader
@@ -35,22 +36,24 @@ from monai.transforms import (
 )
 from monai.visualize import plot_2d_or_3d_image
 
+def get_args():
+    parser = argparse.ArgumentParser(description="Attention U-Net 2D — CoW Segmentation")
 
-def main(tempdir):
+    parser.add_argument("-image_dir",  default="/content/drive/MyDrive/imagesTr",
+                        help="folder containing CTA images (*_0000.nii.gz)"),
+    parser.add_argument("-mask_dir",   default="/content/drive/MyDrive/labelsTr",
+                        help="folder containing segmentation masks (*.nii.gz)")
+    return parser.parse_args()
+    
+def main():
     monai.config.print_config()
     logging.basicConfig(stream=sys.stdout, level=logging.INFO)
-
-    # create a temporary directory and 40 random image, mask pairs
-    print(f"generating synthetic data to {tempdir} (this may take a while)")
-    for i in range(40):
-        im, seg = create_test_image_2d(128, 128, num_seg_classes=1)
-        Image.fromarray((im * 255).astype("uint8")).save(os.path.join(tempdir, f"img{i:d}.png"))
-        Image.fromarray((seg * 255).astype("uint8")).save(os.path.join(tempdir, f"seg{i:d}.png"))
-
-    images = sorted(glob(os.path.join(tempdir, "img*.png")))
-    segs = sorted(glob(os.path.join(tempdir, "seg*.png")))
-    train_files = [{"img": img, "seg": seg} for img, seg in zip(images[:20], segs[:20])]
-    val_files = [{"img": img, "seg": seg} for img, seg in zip(images[-20:], segs[-20:])]
+    images = sorted(glob(os.path.join(args.image_dir, "*.nii.gz")))
+    segs = sorted(glob(os.path.join(args.mask_dir, "*.nii.gz")))
+    train_images, val_images, train_masks, val_masks = train_test_split(files, masks,
+                                                                  test_size=0.2, random_state=42)
+    train_files = [{"img": img, "seg": seg} for img, seg in zip(train_images, train_masks)]
+    val_files = [{"img": img, "seg": seg} for img, seg in zip(val_images, val_masks)]
 
     # define transforms for image and segmentation
     train_transforms = Compose(
@@ -177,5 +180,4 @@ def main(tempdir):
 
 
 if __name__ == "__main__":
-    with tempfile.TemporaryDirectory() as tempdir:
-        main(tempdir)
+    main()
