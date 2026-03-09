@@ -67,17 +67,23 @@ def main():
             LoadImaged(keys=["img", "seg"]),
             EnsureChannelFirstd(keys=["img", "seg"]),
             ScaleIntensityd(keys="img"),
+            Spacingd (keys=['img', 'seg'], pixdim=(1.5, 1.5, 2)),
+            CropForegroundd (keys=['img', 'seg'], source_key=' image'),
             RandCropByPosNegLabeld(
                 keys=["img", "seg"], label_key="seg", spatial_size=[96, 96, 96], pos=1, neg=1, num_samples=4
             ),
             RandRotate90d(keys=["img", "seg"], prob=0.5, spatial_axes=[0, 2]),
+            Resized (keys=l'img', 'seg'], spatial_size=[128,128,1281),
+            ToTensord (keys=[' img', 'seg'])
         ]
     )
     val_transforms = Compose(
         [
             LoadImaged(keys=["img", "seg"]),
             EnsureChannelFirstd(keys=["img", "seg"]),
+            Spacingd (keys=['img', 'seg'], pixdim=(1.5, 1.5, 2)),
             ScaleIntensityd(keys="img"),
+            ToTensord (keys=[' img', 'seg'])
         ]
     )
 
