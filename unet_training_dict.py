@@ -66,21 +66,26 @@ def main():
 
 
     # define transforms for image and segmentation
-    train_transforms = Compose(
-        [
-            LoadImaged(keys=["img", "seg"]),
-            EnsureChannelFirstd(keys=["img", "seg"]),
-            ScaleIntensityd(keys="img"),
-            Spacingd(keys=['img', 'seg'], pixdim=(1.5, 1.5, 2)),
-            CropForegroundd(keys=['img', 'seg'], source_key='img'),
-            RandCropByPosNegLabeld(
-                keys=["img", "seg"], label_key="seg", spatial_size=[96, 96, 96], pos=1, neg=1, num_samples=4
-            ),
-            RandRotate90d(keys=["img", "seg"], prob=0.5, spatial_axes=[0, 2]),
-            Resized(keys=['img', 'seg'], spatial_size=[128,128,1281]),
-            ToTensord(keys=['img', 'seg'])
-        ]
-    )
+    train_transforms = Compose([
+    LoadImaged(keys=["img", "seg"]),
+    EnsureChannelFirstd(keys=["img", "seg"]),
+    ScaleIntensityd(keys="img"),
+    Spacingd(keys=['img', 'seg'], pixdim=(1.5, 1.5, 2)),
+    CropForegroundd(keys=['img', 'seg'], source_key='img'),
+    RandCropByPosNegLabeld(
+        keys=["img", "seg"],
+        label_key="seg",
+        spatial_size=[96, 96, 96],
+        pos=1,
+        neg=1,
+        num_samples=4,
+        allow_smaller=True  # ✅ avoid cropping errors
+    ),
+    RandRotate90d(keys=["img", "seg"], prob=0.5, spatial_axes=[0, 2]),
+    Resized(keys=['img', 'seg'], spatial_size=[128, 128, 128]),  # ✅ fixed typo
+    ToTensord(keys=['img', 'seg'])
+    ])
+    
     val_transforms = Compose(
         [
             LoadImaged(keys=["img", "seg"]),
