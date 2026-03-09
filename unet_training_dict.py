@@ -24,6 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import train_test_split
 
 import monai
+from monai.losses import DiceLoss, FocalLoss
 from monai.data import create_test_image_3d, list_data_collate, decollate_batch
 from monai.inferers import sliding_window_inference
 from monai.metrics import DiceMetric
@@ -31,11 +32,14 @@ from monai.transforms import (
     Activations,
     EnsureChannelFirstd,
     AsDiscrete,
+    AsDiscrete,
     Compose,
     CropForegroundd,
     LoadImaged,
     RandCropByPosNegLabeld,
     RandRotate90d,
+    RandGaussianNoised,
+    RandFlipd,
     Resized,
     ScaleIntensityd,
     Spacingd,
@@ -67,31 +71,37 @@ def main():
 
     # define transforms for image and segmentation
     train_transforms = Compose([
-    LoadImaged(keys=["img", "seg"]),
-    EnsureChannelFirstd(keys=["img", "seg"]),
-    ScaleIntensityd(keys="img"),
-    Spacingd(keys=['img', 'seg'], pixdim=(1.5, 1.5, 2)),
-    CropForegroundd(keys=['img', 'seg'], source_key='img'),
-    RandCropByPosNegLabeld(
-        keys=["img", "seg"],
+        LoadImaged(keys=["img", "seg"]),
+        EnsureChannelFirstd(keys=["img", "seg"]),
+        AsDiscreted(keys=["seg"], to_onehot=False, n_classes=2, threshold_values=[0.5]),
+        Orientationd(keys=["img","seg"], axcodes="RAS"),
+        ScaleIntensityd(keys="img"),
+        Spacingd(keys=['img', 'seg'], pixdim=(1.5, 1.5, 2)),
+        CropForegroundd(keys=['img', 'seg'], source_key='img'),
+        RandCropByPosNegLabeld(
+        keys=["img","seg"],
         label_key="seg",
-        spatial_size=[96, 96, 96],
-        pos=1,
-        neg=1,
+        spatial_size=[96,96,96],  # smaller patch, more focused on arteries
+        pos=3,  # more positive patches per volume
+        neg=1,  # fewer negative patches
         num_samples=4,
-        allow_smaller=True  # ✅ avoid cropping errors
-    ),
-    RandRotate90d(keys=["img", "seg"], prob=0.5, spatial_axes=[0, 2]),
-    Resized(keys=['img', 'seg'], spatial_size=[128, 128, 128]),  # ✅ fixed typo
-    ToTensord(keys=['img', 'seg'])
-    ])
+        allow_smaller=True
+        )
+        RandFlipd(keys=["img","seg"], spatial_axis=0, prob=0.5),
+        RandGaussianNoised(keys=["img"], prob=0.15, mean=0.0, std=0.01),
+        RandRotate90d(keys=["img", "seg"], prob=0.5, spatial_axes=[0,1, 2]),
+        Resized(keys=['img', 'seg'], spatial_size=[128, 128, 128]),  # ✅ fixed typo
+        ToTensord(keys=['img', 'seg'])
+        ])
     
     val_transforms = Compose(
         [
             LoadImaged(keys=["img", "seg"]),
             EnsureChannelFirstd(keys=["img", "seg"]),
+            Orientationd(keys=["img","seg"], axcodes="RAS"),
             Spacingd(keys=['img', 'seg'], pixdim=(1.5, 1.5, 2)),
             ScaleIntensityd(keys="img"),
+            CropForegroundd(keys=["img","seg"], source_key="img"),
             ToTensord(keys=['img', 'seg'])
         ]
     )
@@ -108,7 +118,7 @@ def main():
     # use batch_size=2 to load images and use RandCropByPosNegLabeld to generate 2 x 4 images for network training
     train_loader = DataLoader(
         train_ds,
-        batch_size=4,
+        batch_size=2,
         shuffle=True,
         num_workers=4,
         collate_fn=list_data_collate,
@@ -129,8 +139,8 @@ def main():
         strides=(2, 2, 2, 2),
         num_res_units=2,
     ).to(device)
-    loss_function = monai.losses.DiceLoss(sigmoid=True)
-    optimizer = torch.optim.Adam(model.parameters(), 1e-3)
+    loss_function = monai.losses.DiceLoss(sigmoid=True) + monai.losses.FocalLoss(gamma=2.0)
+    optimizer = torch.optim.Adam(model.parameters(), 2e-4)
 
     # start a typical PyTorch training
     val_interval = 2
@@ -139,7 +149,7 @@ def main():
     epoch_loss_values = list()
     metric_values = list()
     writer = SummaryWriter()
-    for epoch in range(5):
+    for epoch in range(201):
         print("-" * 10)
         print(f"epoch {epoch + 1}/{5}")
         model.train()
