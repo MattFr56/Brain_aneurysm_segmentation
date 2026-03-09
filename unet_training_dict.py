@@ -36,7 +36,7 @@ from monai.transforms import (
     LoadImaged,
     RandCropByPosNegLabeld,
     RandRotate90d,
-    Resized
+    Resized,
     ScaleIntensityd,
     Spacingd,
     ToTensord,
