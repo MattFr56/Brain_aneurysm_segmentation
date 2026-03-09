@@ -604,9 +604,9 @@ def main():
         spatial_dims=2,
         in_channels=3,          # 2.5D: (s-1, s, s+1)
         out_channels=1,
-        channels=(64, 128, 256, 512, 1024),  # deeper — 2x capacity
+        channels=(32, 64, 128, 256, 512),
         strides=(2, 2, 2, 2),
-        dropout=0.2,            # regularization
+        dropout=0.1,
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -626,8 +626,10 @@ def main():
 
     # ── Loss + Metrics ───────────────────────────────────────────────────────
     criterion    = CombinedLoss(cldice_weight=0.3, cldice_start_epoch=20).to(device)
-    dice_metric  = DiceMetric(include_background=False, reduction="mean")
-    hd95_metric  = HausdorffDistanceMetric(include_background=False,
+    # include_background=True is correct for single-channel binary segmentation
+    # include_background=False is for multi-class one-hot encoded outputs only
+    dice_metric  = DiceMetric(include_background=True, reduction="mean")
+    hd95_metric  = HausdorffDistanceMetric(include_background=True,
                                            percentile=95, reduction="mean")
 
     # ── Optimizer — two-phase ────────────────────────────────────────────────
@@ -647,6 +649,15 @@ def main():
                     p.requires_grad = True
                     decoder_params.append(p)
             print(f"Phase 1 — encoder frozen, training decoder only")
+            # CRITICAL: freeze BN running stats in frozen encoder layers
+            # Otherwise BN accumulates corrupted stats from non-updating layers
+            base = model.module if hasattr(model, 'module') else model
+            for name, module in base.named_modules():
+                if isinstance(module, torch.nn.BatchNorm2d):
+                    if any(x in name for x in ['encode', 'down', 'input_block',
+                                                'model.0', 'model.1.submodule.0',
+                                                'model.1.submodule.1']):
+                        module.eval()  # freeze BN stats in encoder
             return torch.optim.AdamW(
                 [p for p in model.parameters() if p.requires_grad],
                 lr=args.lr)
@@ -709,6 +720,14 @@ def main():
         if epoch == 20:
             print("Loss phase B — adding clDice for topology refinement")
         model.train()
+        # Re-freeze BN in encoder during phase 1 (model.train() overrides it)
+        if args.ssl_checkpoint and epoch < args.freeze_epochs:
+            base = model.module if hasattr(model, 'module') else model
+            for name, module in base.named_modules():
+                if isinstance(module, torch.nn.BatchNorm2d):
+                    if any(x in name for x in ['model.0', 'model.1.submodule.0',
+                                                'model.1.submodule.1']):
+                        module.eval()
         train_loss = 0.0
         pbar = tqdm(train_loader, desc=f"Train Epoch {epoch+1}/{args.epochs}",
                     leave=False, mininterval=5)
@@ -767,7 +786,7 @@ def main():
                             pred_prob = (pred_prob + ms_pred) / 2.0
                         # Loss on original only (for monitoring)
                         pred_raw  = model(img)
-                        val_loss += criterion(pred_raw, msk).item()
+                    val_loss += criterion(pred_raw, msk).item()
 
                     # Binarise averaged TTA prediction
                     pred_bin = (pred_prob > 0.5).float()
