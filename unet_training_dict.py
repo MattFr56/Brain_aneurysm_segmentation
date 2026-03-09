@@ -108,7 +108,7 @@ def main():
     # use batch_size=2 to load images and use RandCropByPosNegLabeld to generate 2 x 4 images for network training
     train_loader = DataLoader(
         train_ds,
-        batch_size=16,
+        batch_size=4,
         shuffle=True,
         num_workers=4,
         collate_fn=list_data_collate,
