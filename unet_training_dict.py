@@ -36,6 +36,7 @@ from monai.transforms import (
     Compose,
     CropForegroundd,
     LoadImaged,
+    Orientationd,
     RandCropByPosNegLabeld,
     RandRotate90d,
     RandGaussianNoised,
