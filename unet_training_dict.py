@@ -90,7 +90,7 @@ def main():
         ),
         RandFlipd(keys=["img","seg"], spatial_axis=0, prob=0.5),
         RandGaussianNoised(keys=["img"], prob=0.15, mean=0.0, std=0.01),
-        RandRotate90d(keys=["img", "seg"], prob=0.5, spatial_axes=[0,1, 2]),
+        RandRotate90d(keys=["img", "seg"], prob=0.5, spatial_axes=[1,2]),
         #Resized(keys=['img', 'seg'], spatial_size=[128, 128, 128]),  # ✅ fixed typo
         ToTensord(keys=['img', 'seg'])
         ])
