@@ -45,6 +45,7 @@ from monai.transforms import (
     ScaleIntensityd,
     ScaleIntensityRanged,
     Spacingd,
+    SpatialPadd,
     ToTensord,
 )
 from monai.visualize import plot_2d_or_3d_image
