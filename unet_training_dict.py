@@ -72,7 +72,8 @@ def main():
 
 
     # define transforms for image and segmentation
-   train_transforms = Compose([
+   train_transforms = Compose(
+    [
     LoadImaged(keys=["img", "seg"]),
     EnsureChannelFirstd(keys=["img", "seg"]),
 
@@ -86,21 +87,18 @@ def main():
     a_max=500,
     b_min=0,
     b_max=1,
-    clip=True
-    ),
+    clip=True),
 
     Spacingd(
         keys=["img", "seg"],
         pixdim=(1.5, 1.5, 2),
-        mode=("bilinear","nearest")
-    ),
+        mode=("bilinear","nearest")),
 
     CropForegroundd(keys=["img","seg"], source_key="img"),
 
     SpatialPadd(   # ⭐ important fix
         keys=["img","seg"],
-        spatial_size=(96,96,96)
-    ),
+        spatial_size=(96,96,96)),
 
     RandCropByPosNegLabeld(
         keys=["img","seg"],
@@ -109,8 +107,7 @@ def main():
         pos=3,
         neg=1,
         num_samples=4,
-        allow_smaller=False
-    ),
+        allow_smaller=False),
 
     RandFlipd(keys=["img","seg"], spatial_axis=1, prob=0.5),
      RandFlipd(keys=["img","seg"], spatial_axis=2, prob=0.5),
