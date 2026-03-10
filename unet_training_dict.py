@@ -43,6 +43,7 @@ from monai.transforms import (
     RandFlipd,
     Resized,
     ScaleIntensityd,
+    ScaleIntensityRanged,
     Spacingd,
     ToTensord,
 )
@@ -71,29 +72,55 @@ def main():
 
 
     # define transforms for image and segmentation
-    train_transforms = Compose([
-        LoadImaged(keys=["img", "seg"]),
-        EnsureChannelFirstd(keys=["img", "seg"]),
-        Lambdad(keys=["seg"], func=lambda x: (x>0).long()),
-        Orientationd(keys=["img","seg"], axcodes="RAS"),
-        ScaleIntensityd(keys="img"),
-        Spacingd(keys=['img', 'seg'], pixdim=(1.5, 1.5, 2)),
-        CropForegroundd(keys=['img', 'seg'], source_key='img'),
-        RandCropByPosNegLabeld(
+   train_transforms = Compose([
+    LoadImaged(keys=["img", "seg"]),
+    EnsureChannelFirstd(keys=["img", "seg"]),
+
+    Lambdad(keys=["seg"], func=lambda x: (x>0).long()),
+
+    Orientationd(keys=["img","seg"], axcodes="RAS"),
+
+    ScaleIntensityRanged(
+    keys=["img"],
+    a_min=-1000,
+    a_max=500,
+    b_min=0,
+    b_max=1,
+    clip=True
+    ),
+
+    Spacingd(
+        keys=["img", "seg"],
+        pixdim=(1.5, 1.5, 2),
+        mode=("bilinear","nearest")
+    ),
+
+    CropForegroundd(keys=["img","seg"], source_key="img"),
+
+    SpatialPadd(   # ⭐ important fix
+        keys=["img","seg"],
+        spatial_size=(96,96,96)
+    ),
+
+    RandCropByPosNegLabeld(
         keys=["img","seg"],
         label_key="seg",
-        spatial_size=[96,96,96],  # smaller patch, more focused on arteries
-        pos=3,  # more positive patches per volume
-        neg=1,  # fewer negative patches
+        spatial_size=(96,96,96),
+        pos=3,
+        neg=1,
         num_samples=4,
-        allow_smaller=True
-        ),
-        RandFlipd(keys=["img","seg"], spatial_axis=0, prob=0.5),
-        RandGaussianNoised(keys=["img"], prob=0.15, mean=0.0, std=0.01),
-        RandRotate90d(keys=["img", "seg"], prob=0.5, spatial_axes=[1,2]),
-        #Resized(keys=['img', 'seg'], spatial_size=[128, 128, 128]),  # ✅ fixed typo
-        ToTensord(keys=['img', 'seg'])
-        ])
+        allow_smaller=False
+    ),
+
+    RandFlipd(keys=["img","seg"], spatial_axis=1, prob=0.5),
+     RandFlipd(keys=["img","seg"], spatial_axis=2, prob=0.5),
+
+    RandGaussianNoised(keys=["img"], prob=0.15, mean=0.0, std=0.01),
+
+    RandRotate90d(keys=["img","seg"], prob=0.5, spatial_axes=(1,2)),
+
+    ToTensord(keys=["img","seg"])
+    ])
     
     val_transforms = Compose(
         [
