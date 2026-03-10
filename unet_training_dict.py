@@ -24,7 +24,7 @@ from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import train_test_split
 
 import monai
-from monai.losses import DiceLoss, FocalLoss
+from monai.losses import DiceFocalLoss
 from monai.data import create_test_image_3d, list_data_collate, decollate_batch
 from monai.inferers import sliding_window_inference
 from monai.metrics import DiceMetric
@@ -32,7 +32,7 @@ from monai.transforms import (
     Activations,
     EnsureChannelFirstd,
     AsDiscrete,
-    AsDiscrete,
+    Lambdad,
     Compose,
     CropForegroundd,
     LoadImaged,
@@ -73,7 +73,7 @@ def main():
     train_transforms = Compose([
         LoadImaged(keys=["img", "seg"]),
         EnsureChannelFirstd(keys=["img", "seg"]),
-        AsDiscreted(keys=["seg"], to_onehot=False, n_classes=2, threshold_values=[0.5]),
+        Lambdad(keys=["seg"], func=lambda x: (x>0).long()),
         Orientationd(keys=["img","seg"], axcodes="RAS"),
         ScaleIntensityd(keys="img"),
         Spacingd(keys=['img', 'seg'], pixdim=(1.5, 1.5, 2)),
@@ -90,7 +90,7 @@ def main():
         RandFlipd(keys=["img","seg"], spatial_axis=0, prob=0.5),
         RandGaussianNoised(keys=["img"], prob=0.15, mean=0.0, std=0.01),
         RandRotate90d(keys=["img", "seg"], prob=0.5, spatial_axes=[0,1, 2]),
-        Resized(keys=['img', 'seg'], spatial_size=[128, 128, 128]),  # ✅ fixed typo
+        #Resized(keys=['img', 'seg'], spatial_size=[128, 128, 128]),  # ✅ fixed typo
         ToTensord(keys=['img', 'seg'])
         ])
     
@@ -98,6 +98,7 @@ def main():
         [
             LoadImaged(keys=["img", "seg"]),
             EnsureChannelFirstd(keys=["img", "seg"]),
+            Lambdad(keys=["seg"], func=lambda x: (x>0).long()),
             Orientationd(keys=["img","seg"], axcodes="RAS"),
             Spacingd(keys=['img', 'seg'], pixdim=(1.5, 1.5, 2)),
             ScaleIntensityd(keys="img"),
@@ -127,7 +128,7 @@ def main():
     # create a validation data loader
     val_ds = monai.data.Dataset(data=val_files, transform=val_transforms)
     val_loader = DataLoader(val_ds, batch_size=1, num_workers=4, collate_fn=list_data_collate)
-    dice_metric = DiceMetric(include_background=True, reduction="mean", get_not_nans=False)
+    dice_metric = DiceMetric(include_background=False, reduction="mean", get_not_nans=False)
     post_trans = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
     # create UNet, DiceLoss and Adam optimizer
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -139,7 +140,7 @@ def main():
         strides=(2, 2, 2, 2),
         num_res_units=2,
     ).to(device)
-    loss_function = monai.losses.DiceLoss(sigmoid=True) + monai.losses.FocalLoss(gamma=2.0)
+    loss_function = DiceFocalLoss(sigmoid=True, gamma=2.0)
     optimizer = torch.optim.Adam(model.parameters(), 2e-4)
 
     # start a typical PyTorch training
