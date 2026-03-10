@@ -72,11 +72,14 @@ def main():
 
 
     # define transforms for image and segmentation
-      train_transforms = Compose([
+    train_transforms = Compose([
         LoadImaged(keys=["img", "seg"]),
         EnsureChannelFirstd(keys=["img", "seg"]),
+    
         Lambdad(keys=["seg"], func=lambda x: (x > 0).long()),
+    
         Orientationd(keys=["img", "seg"], axcodes="RAS"),
+    
         ScaleIntensityRanged(
             keys=["img"],
             a_min=-1000,
@@ -85,16 +88,23 @@ def main():
             b_max=1,
             clip=True,
         ),
+    
         Spacingd(
             keys=["img", "seg"],
             pixdim=(1.5, 1.5, 2),
             mode=("bilinear", "nearest"),
         ),
-        CropForegroundd(keys=["img", "seg"], source_key="img"),
+    
+        CropForegroundd(
+            keys=["img", "seg"],
+            source_key="img",
+        ),
+    
         SpatialPadd(
             keys=["img", "seg"],
             spatial_size=(96, 96, 96),
         ),
+    
         RandCropByPosNegLabeld(
             keys=["img", "seg"],
             label_key="seg",
@@ -104,21 +114,34 @@ def main():
             num_samples=4,
             allow_smaller=False,
         ),
-        RandFlipd(keys=["img", "seg"], spatial_axis=1, prob=0.5),
-        RandFlipd(keys=["img", "seg"], spatial_axis=2, prob=0.5),
+    
+        RandFlipd(
+            keys=["img", "seg"],
+            spatial_axis=1,
+            prob=0.5,
+        ),
+    
+        RandFlipd(
+            keys=["img", "seg"],
+            spatial_axis=2,
+            prob=0.5,
+        ),
+    
         RandGaussianNoised(
             keys=["img"],
             prob=0.15,
             mean=0.0,
             std=0.01,
         ),
+    
         RandRotate90d(
             keys=["img", "seg"],
             prob=0.5,
             spatial_axes=(1, 2),
         ),
+    
         ToTensord(keys=["img", "seg"]),
-    ])
+    ])  
     
     val_transforms = Compose(
         [
