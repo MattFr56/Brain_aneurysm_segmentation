@@ -51,7 +51,7 @@ CSV_PATH   = "/kaggle/working/training_log.csv"
 CURVE_PATH = "/kaggle/working/training_curves.png"
 
 # ── Hyperparameters ────────────────────────────────────────────────────────────
-SPATIAL_SIZE  = (128, 128, 32)
+SPATIAL_SIZE  = (96, 96, 16)
 NUM_EPOCHS    = 300
 VAL_INTERVAL  = 2
 TRAIN_SAMPLES = 4
