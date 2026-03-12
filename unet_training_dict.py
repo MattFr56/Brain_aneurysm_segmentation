@@ -123,7 +123,7 @@ def main():
         RandCropByPosNegLabeld(                            # ADDED: val needs fixed-size patches too
             keys=["img", "seg"],
             label_key="seg",
-            spatial_size=(128, 128, 24),
+            spatial_size=(128, 128, 32),
             pos=1.0,
             neg=0.0,                                       # val: pos-only, no random negatives
             num_samples=4,                                 # fewer samples for val
