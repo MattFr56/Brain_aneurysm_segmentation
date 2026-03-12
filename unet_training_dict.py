@@ -1,5 +1,4 @@
 import csv
-import re
 import logging
 import os
 import sys
@@ -11,14 +10,13 @@ import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import train_test_split
 
 import monai
 from monai.losses import DiceFocalLoss
-from monai.data import list_data_collate, decollate_batch
+from monai.data import CacheDataset, list_data_collate, decollate_batch
 from monai.inferers import sliding_window_inference
 from monai.metrics import DiceMetric, HausdorffDistanceMetric
 from monai.networks.nets import AttentionUnet
@@ -35,6 +33,8 @@ from monai.transforms import (
     RandFlipd,
     RandGaussianNoised,
     RandRotate90d,
+    RandScaleIntensityd,
+    RandShiftIntensityd,
     ScaleIntensityRanged,
     Spacingd,
     SpatialPadd,
@@ -42,7 +42,7 @@ from monai.transforms import (
 )
 from monai.visualize import plot_2d_or_3d_image
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 IMAGE_DIR  = "/kaggle/input/datasets/lorfr56/cropped-brain-vessels/cropped_topcow_volumes"
@@ -51,58 +51,27 @@ CHECKPOINT = "/kaggle/working/best_metric_model.pth"
 CSV_PATH   = "/kaggle/working/training_log.csv"
 CURVE_PATH = "/kaggle/working/training_curves.png"
 
+# ── Architecture ───────────────────────────────────────────────────────────────
+# MODE = "resume"  → resume 0.81 checkpoint, channels=(32,64,128,256)
+# MODE = "wider"   → train from scratch, wider channels=(48,96,192,384)
+MODE = "resume"
+
+if MODE == "resume":
+    CHANNELS = (32, 64, 128, 256)
+    STRIDES  = (2, 2, 2)
+else:
+    CHANNELS = (48, 96, 192, 384)
+    STRIDES  = (2, 2, 2)
+
 # ── Hyperparameters ────────────────────────────────────────────────────────────
-SPATIAL_SIZE  = (96, 96, 16)
-NUM_EPOCHS    = 300
-VAL_INTERVAL  = 2
-TRAIN_SAMPLES = 4
-BATCH_SIZE    = 1
-SW_OVERLAP    = 0.25
-PATIENCE      = 40   # val checks without improvement before early stop
-
-
-# ── clDice Loss ────────────────────────────────────────────────────────────────
-def soft_erode(img, kernel_size=3):
-    p = kernel_size // 2
-    return -F.max_pool3d(-img, kernel_size=kernel_size, stride=1, padding=p)
-
-def soft_dilate(img, kernel_size=3):
-    p = kernel_size // 2
-    return F.max_pool3d(img, kernel_size=kernel_size, stride=1, padding=p)
-
-def soft_open(img, kernel_size=3):
-    return soft_dilate(soft_erode(img, kernel_size), kernel_size)
-
-def soft_skel(img, num_iter=10):
-    skel = F.relu(img - soft_open(img))
-    for _ in range(num_iter):
-        img  = soft_erode(img)
-        skel = skel + F.relu(img - soft_open(img))
-    return skel
-
-def soft_cldice_loss(pred_sigmoid, target, num_iter=10, smooth=1e-5):
-    skel_pred   = soft_skel(pred_sigmoid, num_iter)
-    skel_target = soft_skel(target,       num_iter)
-    tprec = (skel_pred   * target).sum()       / (skel_pred.sum()   + smooth)
-    tsens = (skel_target * pred_sigmoid).sum() / (skel_target.sum() + smooth)
-    return 1.0 - 2.0 * (tprec * tsens) / (tprec + tsens + smooth)
-
-
-class CombinedLoss(nn.Module):
-    def __init__(self, alpha=0.2):
-        super().__init__()
-        self.dice_focal = DiceFocalLoss(
-            sigmoid=True,
-            gamma=2.0,
-            lambda_dice=0.5,
-            lambda_focal=0.5,
-        )
-        self.alpha = alpha
-
-    def forward(self, pred, target):
-        df_loss = self.dice_focal(pred, target)
-        cl_loss = soft_cldice_loss(torch.sigmoid(pred), target)
-        return (1 - self.alpha) * df_loss + self.alpha * cl_loss
+SPATIAL_SIZE    = (96, 96, 16)
+NUM_EPOCHS      = 300
+VAL_INTERVAL    = 2
+TRAIN_SAMPLES   = 4
+BATCH_SIZE      = 1
+SW_OVERLAP      = 0.25
+PATIENCE        = 40
+PRED_THRESHOLD  = 0.4    # lower than 0.5 — better recall on thin vessels
 
 
 # ── CSV helpers ────────────────────────────────────────────────────────────────
@@ -115,8 +84,8 @@ def append_csv(path, epoch, train_loss, val_dice, val_hd95, lr):
         csv.writer(f).writerow([
             epoch,
             f"{train_loss:.6f}",
-            f"{val_dice:.6f}"  if val_dice  is not None else "",
-            f"{val_hd95:.4f}"  if val_hd95  is not None else "",
+            f"{val_dice:.6f}" if val_dice is not None else "",
+            f"{val_hd95:.4f}" if val_hd95 is not None else "",
             f"{lr:.8f}",
         ])
 
@@ -135,14 +104,12 @@ def plot_curves(csv_path, out_path):
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 4))
 
-    # Train loss
     axes[0].plot(epochs, losses, color="steelblue", linewidth=1.5)
-    axes[0].set_title("Train Loss (DiceFocal + clDice)")
+    axes[0].set_title("Train Loss (DiceFocal)")
     axes[0].set_xlabel("Epoch")
     axes[0].set_ylabel("Loss")
     axes[0].grid(True, alpha=0.3)
 
-    # Val Dice
     axes[1].plot(val_epochs, dices, color="darkorange", linewidth=1.5, marker="o", markersize=3)
     if dices:
         best_idx = dices.index(max(dices))
@@ -155,7 +122,6 @@ def plot_curves(csv_path, out_path):
     axes[1].set_ylim(0, 1)
     axes[1].grid(True, alpha=0.3)
 
-    # Val HD95
     valid_hd = [(e, h) for e, h in zip(val_epochs, hd95s) if h is not None]
     if valid_hd:
         hd_ep, hd_vals = zip(*valid_hd)
@@ -178,6 +144,7 @@ def plot_curves(csv_path, out_path):
 def main():
     monai.config.print_config()
     logging.basicConfig(stream=sys.stdout, level=logging.INFO)
+    print(f"MODE: {MODE} | channels: {CHANNELS} | spatial_size: {SPATIAL_SIZE}")
 
     # ── Data ───────────────────────────────────────────────────────────────────
     images = sorted(glob(os.path.join(IMAGE_DIR, "*_0000.nii*")))
@@ -226,6 +193,8 @@ def main():
         RandFlipd(keys=["img", "seg"], spatial_axis=2, prob=0.5),
         RandRotate90d(keys=["img", "seg"], prob=0.5, spatial_axes=(0, 1)),
         RandGaussianNoised(keys=["img"], prob=0.15, mean=0.0, std=0.01),
+        RandScaleIntensityd(keys=["img"], factors=0.1, prob=0.5),
+        RandShiftIntensityd(keys=["img"], offsets=0.1, prob=0.5),
         ToTensord(keys=["img", "seg"]),
     ])
 
@@ -244,9 +213,23 @@ def main():
         ToTensord(keys=["img", "seg"]),
     ])
 
-    # ── Sanity check ───────────────────────────────────────────────────────────
-    check_ds     = monai.data.Dataset(data=train_files[:2], transform=train_transforms)
-    check_loader = DataLoader(check_ds, batch_size=2, num_workers=2, collate_fn=list_data_collate)
+    # ── CacheDataset — faster epochs ───────────────────────────────────────────
+    print("Caching datasets...")
+    train_ds = CacheDataset(
+        data=train_files,
+        transform=train_transforms,
+        cache_rate=1.0,
+        num_workers=4,
+    )
+    val_ds = CacheDataset(
+        data=val_files,
+        transform=val_transforms,
+        cache_rate=1.0,
+        num_workers=2,
+    )
+
+    # Sanity check on first cached batch
+    check_loader = DataLoader(train_ds, batch_size=2, num_workers=0, collate_fn=list_data_collate)
     check_data   = monai.utils.misc.first(check_loader)
     img, seg     = check_data["img"], check_data["seg"]
     vessel_vox   = img[seg > 0]
@@ -255,8 +238,6 @@ def main():
     print(f"Vessel voxels: {(seg>0).sum().item()}/{seg.numel()} "
           f"({100*(seg>0).float().mean().item():.2f}%)")
 
-    # ── DataLoaders ────────────────────────────────────────────────────────────
-    train_ds = monai.data.Dataset(data=train_files, transform=train_transforms)
     train_loader = DataLoader(
         train_ds,
         batch_size=BATCH_SIZE,
@@ -265,7 +246,6 @@ def main():
         collate_fn=list_data_collate,
         pin_memory=torch.cuda.is_available(),
     )
-    val_ds     = monai.data.Dataset(data=val_files, transform=val_transforms)
     val_loader = DataLoader(val_ds, batch_size=1, num_workers=2, collate_fn=list_data_collate)
 
     # ── Model ──────────────────────────────────────────────────────────────────
@@ -274,44 +254,59 @@ def main():
         spatial_dims=3,
         in_channels=1,
         out_channels=1,
-        channels=(32, 64, 128, 256),
-        strides=(2, 2, 2),
+        channels=CHANNELS,
+        strides=STRIDES,
     ).to(device)
 
-    if os.path.exists(CHECKPOINT):
+    # ── Resume from checkpoint ─────────────────────────────────────────────────
+    best_metric = -1
+    if MODE == "resume" and os.path.exists(CHECKPOINT):
         ckpt  = torch.load(CHECKPOINT, map_location=device, weights_only=False)
-        state = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
+        state = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
         model.load_state_dict(state)
-        print(f"✓ Resumed from checkpoint (prev best dice: {ckpt.get('best_metric', '?')})")
+        best_metric = (
+            ckpt.get("best_dice", ckpt.get("best_metric", -1))
+            if isinstance(ckpt, dict) else -1
+        )
+        print(f"✓ Resumed checkpoint — best metric restored to {best_metric:.4f}")
+    elif MODE == "wider":
+        print("✓ Wider model — training from scratch")
     else:
         print("No checkpoint found — training from scratch")
 
-    # ── Loss, optimiser, scheduler ─────────────────────────────────────────────
-    loss_function = CombinedLoss(alpha=0.4)
-    optimizer     = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
-    scheduler     = torch.optim.lr_scheduler.CosineAnnealingLR(
+    # ── Loss ───────────────────────────────────────────────────────────────────
+    loss_function = DiceFocalLoss(
+        sigmoid=True,
+        gamma=2.0,
+        lambda_dice=0.5,
+        lambda_focal=0.5,
+    )
+
+    # ── Optimiser + schedulers ─────────────────────────────────────────────────
+    lr = 1e-4 if MODE == "resume" else 2e-4
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
+
+    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=NUM_EPOCHS, eta_min=1e-6
+    )
+    plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", factor=0.5, patience=10, verbose=True
     )
 
     # ── Metrics ────────────────────────────────────────────────────────────────
-    dice_metric = DiceMetric(
-        include_background=False,
-        reduction="mean",
-        get_not_nans=False,
-    )
+    dice_metric = DiceMetric(include_background=False, reduction="mean", get_not_nans=False)
     hd95_metric = HausdorffDistanceMetric(
-        include_background=False,
-        percentile=95,          # HD95
-        reduction="mean",
-        get_not_nans=False,     # skip volumes where pred or GT is empty
+        include_background=False, percentile=95, reduction="mean", get_not_nans=False
     )
-    post_trans = Compose([Activations(sigmoid=True), AsDiscrete(threshold=0.5)])
+    post_trans = Compose([
+        Activations(sigmoid=True),
+        AsDiscrete(threshold=PRED_THRESHOLD),   # 0.4 — better recall on thin vessels
+    ])
 
     # ── CSV init ───────────────────────────────────────────────────────────────
     init_csv(CSV_PATH)
 
     # ── Training loop ──────────────────────────────────────────────────────────
-    best_metric       = -1
     best_metric_epoch = -1
     no_improve_count  = 0
     writer            = SummaryWriter()
@@ -340,9 +335,9 @@ def main():
             writer.add_scalar("train_loss", loss.item(), epoch_len * epoch + step)
 
         epoch_loss /= step
-        current_lr  = scheduler.get_last_lr()[0]
+        current_lr  = cosine_scheduler.get_last_lr()[0]
         print(f"epoch {epoch + 1} average loss: {epoch_loss:.4f}  lr: {current_lr:.2e}")
-        scheduler.step()
+        cosine_scheduler.step()
         writer.add_scalar("lr", current_lr, epoch + 1)
 
         # ── Validation ────────────────────────────────────────────────────────
@@ -374,19 +369,22 @@ def main():
                 dice_metric.reset()
                 hd95_metric.reset()
 
-                # Save best model based on Dice (primary metric)
+                # ReduceLROnPlateau step on val Dice
+                plateau_scheduler.step(val_dice)
+
                 if val_dice > best_metric:
                     best_metric       = val_dice
                     best_metric_epoch = epoch + 1
                     no_improve_count  = 0
                     torch.save({
                         "state_dict":   model.state_dict(),
-                        "channels":     (32, 64, 128, 256),
-                        "strides":      (2, 2, 2),
+                        "channels":     CHANNELS,
+                        "strides":      STRIDES,
                         "spatial_size": SPATIAL_SIZE,
                         "epoch":        epoch + 1,
                         "best_dice":    best_metric,
                         "best_hd95":    val_hd95,
+                        "threshold":    PRED_THRESHOLD,
                     }, CHECKPOINT)
                     print("  ✓ saved new best model")
                 else:
@@ -403,7 +401,7 @@ def main():
                 plot_2d_or_3d_image(val_labels,  epoch + 1, writer, index=0, tag="label")
                 plot_2d_or_3d_image(val_outputs, epoch + 1, writer, index=0, tag="output")
 
-        # ── CSV + curves (every epoch) ─────────────────────────────────────────
+        # ── CSV + curves ───────────────────────────────────────────────────────
         append_csv(CSV_PATH, epoch + 1, epoch_loss, val_dice, val_hd95, current_lr)
         plot_curves(CSV_PATH, CURVE_PATH)
 
@@ -414,9 +412,9 @@ def main():
             break
 
     print(f"\nTraining complete.")
-    print(f"Best Dice: {best_metric:.4f} at epoch {best_metric_epoch}")
-    print(f"CSV log     → {CSV_PATH}")
-    print(f"Curve image → {CURVE_PATH}")
+    print(f"Best Dice : {best_metric:.4f} at epoch {best_metric_epoch}")
+    print(f"CSV       → {CSV_PATH}")
+    print(f"Plot      → {CURVE_PATH}")
     writer.close()
 
 
