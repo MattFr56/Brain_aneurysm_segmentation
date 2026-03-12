@@ -30,7 +30,7 @@ from monai.transforms import (
     LoadImaged,
     Orientationd,
     RandCropByPosNegLabeld,
-    RandElasticDeformd,
+    Rand3DElasticd,
     RandFlipd,
     RandGaussianNoised,
     RandRotate90d,
