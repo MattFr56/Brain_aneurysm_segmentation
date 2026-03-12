@@ -47,7 +47,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 # ── Paths ──────────────────────────────────────────────────────────────────────
 IMAGE_DIR  = "/kaggle/input/datasets/lorfr56/cropped-brain-vessels/cropped_topcow_volumes"
 MASK_DIR   = "/kaggle/input/datasets/lorfr56/cropped-brain-vessels/cropped_topcow_labels"
-CHECKPOINT = "/kaggle/input/datasets/lorfr56/cropped-brain-vessels/best_metric_model.pth"
+CHECKPOINT = "/kaggle/working/best_metric_model.pth"
 CSV_PATH   = "/kaggle/working/training_log.csv"
 CURVE_PATH = "/kaggle/working/training_curves.png"
 
