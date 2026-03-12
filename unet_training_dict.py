@@ -87,11 +87,11 @@ def main():
             clip=True,
         ),
         Lambdad(keys=["seg"], func=lambda x: (x > 0).long()),
-        SpatialPadd(keys=["img", "seg"], spatial_size=(128, 128, 24)),  # UNCOMMENTED: guarantees min size
+        SpatialPadd(keys=["img", "seg"], spatial_size=(128, 128, 32)),  # UNCOMMENTED: guarantees min size
         RandCropByPosNegLabeld(
             keys=["img", "seg"],
             label_key="seg",
-            spatial_size=(128, 128, 24),
+            spatial_size=(128, 128, 32),
             pos=0.7,
             neg=0.3,
             num_samples=16,
