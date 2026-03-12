@@ -78,7 +78,7 @@ def main():
         Orientationd(keys=["img", "seg"], axcodes="RAS"),
         EnsureChannelFirstd(keys=["img", "seg"]),
         Lambdad(keys=["seg"], func=lambda x: (x > 0).long()),
-        Spacingd(keys=["image","label"], pixdim=(1.0,1.0,1.0), mode=("bilinear","nearest")),
+        Spacingd(keys=["img","seg"], pixdim=(1.0,1.0,1.0), mode=("bilinear","nearest")),
         ScaleIntensityRanged(
             keys=["img"],
             a_min=-1000,
@@ -121,7 +121,7 @@ def main():
             Orientationd(keys=["img","seg"], axcodes="RAS"),
             EnsureChannelFirstd(keys=["img", "seg"]),
             Lambdad(keys=["seg"], func=lambda x: (x>0).long()),
-            Spacingd(keys=["image","label"], pixdim=(1.0,1.0,1.0), mode=("bilinear","nearest")),
+            Spacingd(keys=["img","seg"], pixdim=(1.0,1.0,1.0), mode=("bilinear","nearest")),
             ScaleIntensityRanged(
             keys=["img"],
             a_min=-1000,
