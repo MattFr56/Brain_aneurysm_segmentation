@@ -40,11 +40,11 @@ MASK_DIR    = "/kaggle/input/datasets/lorfr56/cropped-brain-vessels/cropped_topc
 CHECKPOINT  = "/kaggle/working/best_metric_model.pth"
 
 # ── Hyperparameters ────────────────────────────────────────────────────────────
-SPATIAL_SIZE   = (96, 96, 32)   # must be divisible by 2^4=16 in every dim
+SPATIAL_SIZE   = (96, 96, 16)   # must be divisible by 2^4=16 in every dim
 NUM_EPOCHS     = 200
 VAL_INTERVAL   = 2
-TRAIN_SAMPLES  = 32               # RandCrop samples per volume
-VAL_SAMPLES    = 4
+TRAIN_SAMPLES  = 8              # RandCrop samples per volume
+VAL_SAMPLES    = 2
 BATCH_SIZE     = 2                # x TRAIN_SAMPLES patches per step
 LR             = 2e-4
 SW_OVERLAP     = 0.25
