@@ -35,8 +35,8 @@ from monai.visualize import plot_2d_or_3d_image
 
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-IMAGE_DIR   = "/kaggle/input/datasets/mattfr56/cow-data/imagesTr"
-MASK_DIR    = "/kaggle/input/datasets/mattfr56/cow-data/labelsTr"
+IMAGE_DIR   = "/kaggle/input/datasets/lorfr56/cropped-brain-vessels/cropped_topcow_volumes"
+MASK_DIR    = "/kaggle/input/datasets/lorfr56/cropped-brain-vessels/cropped_topcow_labels"
 CHECKPOINT  = "/kaggle/working/best_metric_model.pth"
 
 # ── Hyperparameters ────────────────────────────────────────────────────────────
