@@ -40,10 +40,10 @@ MASK_DIR    = "/kaggle/input/datasets/lorfr56/cropped-brain-vessels/cropped_topc
 CHECKPOINT  = "/kaggle/working/best_metric_model.pth"
 
 # ── Hyperparameters ────────────────────────────────────────────────────────────
-SPATIAL_SIZE   = (128, 128, 32)   # must be divisible by 2^4=16 in every dim
+SPATIAL_SIZE   = (96, 96, 32)   # must be divisible by 2^4=16 in every dim
 NUM_EPOCHS     = 200
 VAL_INTERVAL   = 2
-TRAIN_SAMPLES  = 16               # RandCrop samples per volume
+TRAIN_SAMPLES  = 32               # RandCrop samples per volume
 VAL_SAMPLES    = 4
 BATCH_SIZE     = 2                # x TRAIN_SAMPLES patches per step
 LR             = 2e-4
@@ -74,7 +74,7 @@ def main():
         Spacingd(keys=["img", "seg"], pixdim=(1.0, 1.0, 1.0), mode=("bilinear", "nearest")),
         ScaleIntensityRanged(
             keys=["img"],
-            a_min=-1000, a_max=500,
+            a_min=100, a_max=600,
             b_min=0.0,   b_max=1.0,
             clip=True,
         ),
@@ -85,8 +85,8 @@ def main():
             keys=["img", "seg"],
             label_key="seg",
             spatial_size=SPATIAL_SIZE,
-            pos=0.7,
-            neg=0.3,
+            pos=0.9,
+            neg=0.1,
             num_samples=TRAIN_SAMPLES,
             allow_smaller=False,
         ),
@@ -105,7 +105,7 @@ def main():
         Spacingd(keys=["img", "seg"], pixdim=(1.0, 1.0, 1.0), mode=("bilinear", "nearest")),
         ScaleIntensityRanged(
             keys=["img"],
-            a_min=-1000, a_max=500,
+            a_min=100, a_max=600,
             b_min=0.0,   b_max=1.0,
             clip=True,
         ),
@@ -142,7 +142,7 @@ def main():
         spatial_dims=3,
         in_channels=1,
         out_channels=1,
-        channels=(32, 64, 128, 256, 512),
+        channels=(32, 64, 128, 256),
         strides=(2, 2, 2, 2),
     ).to(device)
 
