@@ -184,8 +184,8 @@ def main():
     assert len(images) == len(segs), f"Mismatch: {len(images)} vs {len(segs)}"
 
     for img_path, seg_path in zip(images, segs):
-    img_id = os.path.basename(img_path)
-    seg_id = os.path.basename(seg_path)
+        img_id = os.path.basename(img_path)
+        seg_id = os.path.basename(seg_path)
     # Strip all known suffixes to get bare ID
     for suffix in ("_0000.nii.gz", "_0000.nii", ".nii.gz", ".nii"):
         img_id = img_id.replace(suffix, "")
