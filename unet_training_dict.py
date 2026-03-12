@@ -75,10 +75,9 @@ def main():
     # define transforms for image and segmentation
     train_transforms = Compose([
     LoadImaged(keys=["img", "seg"]),
+    EnsureChannelFirstd(keys=["img", "seg"]),          # MOVED: must be before Orientation
     Orientationd(keys=["img", "seg"], axcodes="RAS"),
-    EnsureChannelFirstd(keys=["img", "seg"]),
-    Lambdad(keys=["seg"], func=lambda x: (x > 0).long()),
-    Spacingd(keys=["img","seg"], pixdim=(1.0,1.0,1.0), mode=("bilinear","nearest")),
+    Spacingd(keys=["img", "seg"], pixdim=(1.0, 1.0, 1.0), mode=("bilinear", "nearest")),
     ScaleIntensityRanged(
         keys=["img"],
         a_min=-1000,
@@ -87,7 +86,8 @@ def main():
         b_max=1,
         clip=True,
     ),
-    #SpatialPadd(keys=["img","seg"], spatial_size=(128,128,24)),  # NEW
+    Lambdad(keys=["seg"], func=lambda x: (x > 0).long()),
+    SpatialPadd(keys=["img", "seg"], spatial_size=(128, 128, 24)),  # UNCOMMENTED: guarantees min size
     RandCropByPosNegLabeld(
         keys=["img", "seg"],
         label_key="seg",
@@ -95,36 +95,42 @@ def main():
         pos=0.7,
         neg=0.3,
         num_samples=16,
-        allow_smaller=True,  # safer after padding
+        allow_smaller=False,                           # CHANGED: SpatialPadd makes this safe
     ),
-    # flip each axis separately
     RandFlipd(keys=["img", "seg"], spatial_axis=0, prob=0.5),
     RandFlipd(keys=["img", "seg"], spatial_axis=1, prob=0.5),
     RandFlipd(keys=["img", "seg"], spatial_axis=2, prob=0.5),
     RandGaussianNoised(keys=["img"], prob=0.15, mean=0.0, std=0.01),
-    # rotate only XY plane to avoid swapping Z
-    RandRotate90d(keys=["img", "seg"], prob=0.5, spatial_axes=(0,1)),
+    RandRotate90d(keys=["img", "seg"], prob=0.5, spatial_axes=(0, 1)),
     ToTensord(keys=["img", "seg"]),
-    ])  
-    
-    val_transforms = Compose(
-        [
-            LoadImaged(keys=["img", "seg"]),
-            Orientationd(keys=["img","seg"], axcodes="RAS"),
-            EnsureChannelFirstd(keys=["img", "seg"]),
-            Lambdad(keys=["seg"], func=lambda x: (x>0).long()),
-            Spacingd(keys=["img","seg"], pixdim=(1.0,1.0,1.0), mode=("bilinear","nearest")),
-            ScaleIntensityRanged(
-            keys=["img"],
-            a_min=-1000,
-            a_max=500,
-            b_min=0,
-            b_max=1,
-            clip=True,
-            ),
-            ToTensord(keys=['img', 'seg'])
-        ]
-    )
+])
+
+val_transforms = Compose([
+    LoadImaged(keys=["img", "seg"]),
+    EnsureChannelFirstd(keys=["img", "seg"]),          # MOVED
+    Orientationd(keys=["img", "seg"], axcodes="RAS"),
+    Spacingd(keys=["img", "seg"], pixdim=(1.0, 1.0, 1.0), mode=("bilinear", "nearest")),
+    ScaleIntensityRanged(
+        keys=["img"],
+        a_min=-1000,
+        a_max=500,
+        b_min=0,
+        b_max=1,
+        clip=True,
+    ),
+    Lambdad(keys=["seg"], func=lambda x: (x > 0).long()),
+    SpatialPadd(keys=["img", "seg"], spatial_size=(128, 128, 24)),  # ADDED: prevents collate crash
+    RandCropByPosNegLabeld(                            # ADDED: val needs fixed-size patches too
+        keys=["img", "seg"],
+        label_key="seg",
+        spatial_size=(128, 128, 24),
+        pos=1.0,
+        neg=0.0,                                       # val: pos-only, no random negatives
+        num_samples=4,                                 # fewer samples for val
+        allow_smaller=False,
+    ),
+    ToTensord(keys=["img", "seg"]),
+])
 
     # define dataset, data loader
     check_ds = monai.data.Dataset(data=train_files, transform=train_transforms)
@@ -158,7 +164,6 @@ def main():
         channels=(16, 32, 64, 128, 256),
         strides=(2, 2, 2, 2),
         num_res_units=2,
-        deep_supervision=True,
     ).to(device)
     loss_function = DiceFocalLoss(sigmoid=True, gamma=2.0)
     optimizer = torch.optim.Adam(model.parameters(), 2e-4)
