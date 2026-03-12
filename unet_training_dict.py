@@ -119,7 +119,7 @@ def main():
             clip=True,
         ),
         Lambdad(keys=["seg"], func=lambda x: (x > 0).long()),
-        SpatialPadd(keys=["img", "seg"], spatial_size=(128, 128, 24)),  # ADDED: prevents collate crash
+        SpatialPadd(keys=["img", "seg"], spatial_size=(128, 128, 32)),  # ADDED: prevents collate crash
         RandCropByPosNegLabeld(                            # ADDED: val needs fixed-size patches too
             keys=["img", "seg"],
             label_key="seg",
