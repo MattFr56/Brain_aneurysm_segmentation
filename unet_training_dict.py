@@ -96,35 +96,19 @@ def main():
             mode=("bilinear", "nearest"),
         ),
     
-        CropForegroundd(
-            keys=["img", "seg"],
-            source_key="img",
-        ),
-    
-        SpatialPadd(
-            keys=["img", "seg"],
-            spatial_size=(96, 96, 96),
-        ),
-    
         RandCropByPosNegLabeld(
             keys=["img", "seg"],
             label_key="seg",
-            spatial_size=(96, 96, 96),
-            pos=3,
-            neg=1,
-            num_samples=4,
+            spatial_size=(128, 128, 24),
+            pos=0.7,
+            neg=0.3,
+            num_samples=16,
             allow_smaller=False,
         ),
     
         RandFlipd(
             keys=["img", "seg"],
-            spatial_axis=1,
-            prob=0.5,
-        ),
-    
-        RandFlipd(
-            keys=["img", "seg"],
-            spatial_axis=2,
+            spatial_axis=(0),1
             prob=0.5,
         ),
     
@@ -152,7 +136,6 @@ def main():
             Orientationd(keys=["img","seg"], axcodes="RAS"),
             Spacingd(keys=['img', 'seg'], pixdim=(1.5, 1.5, 2)),
             ScaleIntensityd(keys="img"),
-            CropForegroundd(keys=["img","seg"], source_key="img"),
             ToTensord(keys=['img', 'seg'])
         ]
     )
@@ -189,6 +172,7 @@ def main():
         channels=(16, 32, 64, 128, 256),
         strides=(2, 2, 2, 2),
         num_res_units=2,
+        deep_supervision=True,
     ).to(device)
     loss_function = DiceFocalLoss(sigmoid=True, gamma=2.0)
     optimizer = torch.optim.Adam(model.parameters(), 2e-4)
