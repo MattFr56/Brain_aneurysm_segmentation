@@ -108,7 +108,7 @@ def main():
     
         RandFlipd(
             keys=["img", "seg"],
-            spatial_axis=(0,1)
+            spatial_axis=(0,1),
             prob=0.5,
         ),
     
