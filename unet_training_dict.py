@@ -1,4 +1,5 @@
 import csv
+import re
 import logging
 import os
 import sys
@@ -184,12 +185,14 @@ def main():
     assert len(images) == len(segs), f"Mismatch: {len(images)} vs {len(segs)}"
 
     for img_path, seg_path in zip(images, segs):
-        img_id = os.path.basename(img_path)
-        seg_id = os.path.basename(seg_path)
-    # Strip all known suffixes to get bare ID
-    for suffix in ("_0000.nii.gz", "_0000.nii", ".nii.gz", ".nii"):
-        img_id = img_id.replace(suffix, "")
-        seg_id = seg_id.replace(suffix, "")
+        def get_id(path):
+            name = os.path.basename(path)
+            name = name.replace(".nii.gz", "").replace(".nii", "")  # strip extension
+            name = re.sub(r"_0000$", "", name)                       # strip _0000
+            return name
+
+        img_id = get_id(img_path)
+        seg_id = get_id(seg_path)
         assert img_id == seg_id, f"Pair mismatch: {img_id} vs {seg_id}"
     print(f"✓ {len(images)} verified image/mask pairs")
 
