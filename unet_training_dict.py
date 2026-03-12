@@ -75,12 +75,10 @@ def main():
     # define transforms for image and segmentation
     train_transforms = Compose([
         LoadImaged(keys=["img", "seg"]),
-        EnsureChannelFirstd(keys=["img", "seg"]),
-    
-        Lambdad(keys=["seg"], func=lambda x: (x > 0).long()),
-    
         Orientationd(keys=["img", "seg"], axcodes="RAS"),
-    
+        EnsureChannelFirstd(keys=["img", "seg"]),
+        Lambdad(keys=["seg"], func=lambda x: (x > 0).long()),
+        Spacingd(keys=["image","label"], pixdim=(1.0,1.0,1.0), mode=("bilinear","nearest")),
         ScaleIntensityRanged(
             keys=["img"],
             a_min=-1000,
@@ -89,7 +87,6 @@ def main():
             b_max=1,
             clip=True,
         ),
-
         RandCropByPosNegLabeld(
             keys=["img", "seg"],
             label_key="seg",
@@ -99,36 +96,32 @@ def main():
             num_samples=16,
             allow_smaller=False,
         ),
-    
         RandFlipd(
             keys=["img", "seg"],
             spatial_axis=(0,1),
             prob=0.5,
-        ),
-    
+        ),  
         RandGaussianNoised(
             keys=["img"],
             prob=0.15,
             mean=0.0,
             std=0.01,
         ),
-    
         RandRotate90d(
             keys=["img", "seg"],
             prob=0.5,
             spatial_axes=(1, 2),
         ),
-    
         ToTensord(keys=["img", "seg"]),
     ])  
     
     val_transforms = Compose(
         [
             LoadImaged(keys=["img", "seg"]),
+            Orientationd(keys=["img","seg"], axcodes="RAS"),
             EnsureChannelFirstd(keys=["img", "seg"]),
             Lambdad(keys=["seg"], func=lambda x: (x>0).long()),
-            Orientationd(keys=["img","seg"], axcodes="RAS"),
-            #Spacingd(keys=['img', 'seg'], pixdim=(1.5, 1.5, 2)),
+            Spacingd(keys=["image","label"], pixdim=(1.0,1.0,1.0), mode=("bilinear","nearest")),
             ScaleIntensityRanged(
             keys=["img"],
             a_min=-1000,
