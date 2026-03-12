@@ -34,7 +34,7 @@ from monai.transforms import (
 # ── Paths ──────────────────────────────────────────────────────────────────────
 IMAGE_DIR    = "/kaggle/input/datasets/lorfr56/cropped-brain-vessels/inference_data"
 OUTPUT_DIR   = "/kaggle/working/predictions"
-CHECKPOINT   = "/kaggle/working/best_metric_model.pth"
+CHECKPOINT   = "/kaggle/working/best_metric_model-2.pth"
 
 # ── Inference settings ─────────────────────────────────────────────────────────
 SPATIAL_SIZE = (96, 96, 16)   # must match training
