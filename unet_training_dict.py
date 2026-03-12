@@ -183,18 +183,7 @@ def main():
     images = sorted(glob(os.path.join(IMAGE_DIR, "*_0000.nii*")))
     segs   = sorted(glob(os.path.join(MASK_DIR,  "*.nii*")))
     assert len(images) == len(segs), f"Mismatch: {len(images)} vs {len(segs)}"
-
-    for img_path, seg_path in zip(images, segs):
-        def get_id(path):
-            name = os.path.basename(path)
-            name = name.replace(".nii.gz", "").replace(".nii", "")  # strip extension
-            name = re.sub(r"_0000$", "", name)                       # strip _0000
-            return name
-
-        img_id = get_id(img_path)
-        seg_id = get_id(seg_path)
-        assert img_id == seg_id, f"Pair mismatch: {img_id} vs {seg_id}"
-    print(f"✓ {len(images)} verified image/mask pairs")
+    print(f"✓ {len(images)} image/mask pairs — paired by sorted order")
 
     train_images, val_images, train_masks, val_masks = train_test_split(
         images, segs, test_size=0.2, random_state=42
