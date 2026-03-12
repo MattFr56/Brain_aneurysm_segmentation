@@ -218,7 +218,7 @@ def main():
             num_samples=TRAIN_SAMPLES,
             allow_smaller=False,
         ),
-        RandElasticDeformd(
+        Rand3DElasticd(
             keys=["img", "seg"],
             sigma_range=(3, 5),
             magnitude_range=(50, 150),
