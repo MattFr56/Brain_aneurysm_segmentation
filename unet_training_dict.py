@@ -278,8 +278,8 @@ def main():
         spatial_dims=3,
         in_channels=1,
         out_channels=1,
-        channels=(32, 64, 128, 256, 512),
-        strides=(2, 2, 2, 2),
+        channels=(32, 64, 128, 256),
+        strides=(2, 2, 2),
     ).to(device)
 
     if os.path.exists(CHECKPOINT):
@@ -385,8 +385,8 @@ def main():
                     no_improve_count  = 0
                     torch.save({
                         "state_dict":   model.state_dict(),
-                        "channels":     (32, 64, 128, 256, 512),
-                        "strides":      (2, 2, 2, 2),
+                        "channels":     (32, 64, 128, 256),
+                        "strides":      (2, 2, 2),
                         "spatial_size": SPATIAL_SIZE,
                         "epoch":        epoch + 1,
                         "best_dice":    best_metric,
