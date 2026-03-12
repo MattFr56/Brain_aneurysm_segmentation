@@ -89,13 +89,7 @@ def main():
             b_max=1,
             clip=True,
         ),
-    
-        Spacingd(
-            keys=["img", "seg"],
-            pixdim=(1.5, 1.5, 2),
-            mode=("bilinear", "nearest"),
-        ),
-    
+
         RandCropByPosNegLabeld(
             keys=["img", "seg"],
             label_key="seg",
@@ -134,8 +128,15 @@ def main():
             EnsureChannelFirstd(keys=["img", "seg"]),
             Lambdad(keys=["seg"], func=lambda x: (x>0).long()),
             Orientationd(keys=["img","seg"], axcodes="RAS"),
-            Spacingd(keys=['img', 'seg'], pixdim=(1.5, 1.5, 2)),
-            ScaleIntensityd(keys="img"),
+            #Spacingd(keys=['img', 'seg'], pixdim=(1.5, 1.5, 2)),
+            ScaleIntensityRanged(
+            keys=["img"],
+            a_min=-1000,
+            a_max=500,
+            b_min=0,
+            b_max=1,
+            clip=True,
+            ),
             ToTensord(keys=['img', 'seg'])
         ]
     )
