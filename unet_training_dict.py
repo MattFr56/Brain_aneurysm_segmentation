@@ -89,7 +89,7 @@ def soft_cldice_loss(pred_sigmoid, target, num_iter=10, smooth=1e-5):
 
 
 class CombinedLoss(nn.Module):
-    def __init__(self, alpha=0.4):
+    def __init__(self, alpha=0.2):
         super().__init__()
         self.dice_focal = DiceFocalLoss(
             sigmoid=True,
@@ -288,7 +288,7 @@ def main():
 
     # ── Loss, optimiser, scheduler ─────────────────────────────────────────────
     loss_function = CombinedLoss(alpha=0.4)
-    optimizer     = torch.optim.Adam(model.parameters(), lr=5e-5, weight_decay=1e-5)
+    optimizer     = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
     scheduler     = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=NUM_EPOCHS, eta_min=1e-6
     )
