@@ -74,45 +74,37 @@ def main():
 
     # define transforms for image and segmentation
     train_transforms = Compose([
-        LoadImaged(keys=["img", "seg"]),
-        Orientationd(keys=["img", "seg"], axcodes="RAS"),
-        EnsureChannelFirstd(keys=["img", "seg"]),
-        Lambdad(keys=["seg"], func=lambda x: (x > 0).long()),
-        Spacingd(keys=["img","seg"], pixdim=(1.0,1.0,1.0), mode=("bilinear","nearest")),
-        ScaleIntensityRanged(
-            keys=["img"],
-            a_min=-1000,
-            a_max=500,
-            b_min=0,
-            b_max=1,
-            clip=True,
-        ),
-        RandCropByPosNegLabeld(
-            keys=["img", "seg"],
-            label_key="seg",
-            spatial_size=(128, 128, 24),
-            pos=0.7,
-            neg=0.3,
-            num_samples=16,
-            allow_smaller=False,
-        ),
-        RandFlipd(
-            keys=["img", "seg"],
-            spatial_axis=(0,1),
-            prob=0.5,
-        ),  
-        RandGaussianNoised(
-            keys=["img"],
-            prob=0.15,
-            mean=0.0,
-            std=0.01,
-        ),
-        RandRotate90d(
-            keys=["img", "seg"],
-            prob=0.5,
-            spatial_axes=(1, 2),
-        ),
-        ToTensord(keys=["img", "seg"]),
+    LoadImaged(keys=["img", "seg"]),
+    Orientationd(keys=["img", "seg"], axcodes="RAS"),
+    EnsureChannelFirstd(keys=["img", "seg"]),
+    Lambdad(keys=["seg"], func=lambda x: (x > 0).long()),
+    Spacingd(keys=["img","seg"], pixdim=(1.0,1.0,1.0), mode=("bilinear","nearest")),
+    ScaleIntensityRanged(
+        keys=["img"],
+        a_min=-1000,
+        a_max=500,
+        b_min=0,
+        b_max=1,
+        clip=True,
+    ),
+    #SpatialPadd(keys=["img","seg"], spatial_size=(128,128,24)),  # NEW
+    RandCropByPosNegLabeld(
+        keys=["img", "seg"],
+        label_key="seg",
+        spatial_size=(128, 128, 24),
+        pos=0.7,
+        neg=0.3,
+        num_samples=16,
+        allow_smaller=True,  # safer after padding
+    ),
+    # flip each axis separately
+    RandFlipd(keys=["img", "seg"], spatial_axis=0, prob=0.5),
+    RandFlipd(keys=["img", "seg"], spatial_axis=1, prob=0.5),
+    RandFlipd(keys=["img", "seg"], spatial_axis=2, prob=0.5),
+    RandGaussianNoised(keys=["img"], prob=0.15, mean=0.0, std=0.01),
+    # rotate only XY plane to avoid swapping Z
+    RandRotate90d(keys=["img", "seg"], prob=0.5, spatial_axes=(0,1)),
+    ToTensord(keys=["img", "seg"]),
     ])  
     
     val_transforms = Compose(
