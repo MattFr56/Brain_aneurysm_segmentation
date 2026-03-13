@@ -40,7 +40,7 @@ IMAGE_DIR    = "/kaggle/input/datasets/lorfr56/cropped-brain-vessels/inference_d
 OUTPUT_DIR   = "/kaggle/working/predictions"
 
 # Single model inference — set CHECKPOINT_2 = None to disable ensemble
-CHECKPOINT_1 = "/kaggle/working/best_metric_model-2.pth"
+CHECKPOINT_1 = "/kaggle/working/best_metric_model-3.pth"
 CHECKPOINT_2 = None   # e.g. "/kaggle/working/best_metric_model_seed43.pth"
 
 SW_BATCH   = 4
