@@ -47,30 +47,30 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 # ── Paths ──────────────────────────────────────────────────────────────────────
 IMAGE_DIR  = "/kaggle/input/datasets/lorfr56/cropped-brain-vessels/cropped_topcow_volumes"
 MASK_DIR   = "/kaggle/input/datasets/lorfr56/cropped-brain-vessels/cropped_topcow_labels"
-CHECKPOINT = "/kaggle/working/best_metric_model.pth"
+CHECKPOINT = "/kaggle/working/best_metric_model_3.pth"
 CSV_PATH   = "/kaggle/working/training_log.csv"
 CURVE_PATH = "/kaggle/working/training_curves.png"
 
 # ── Architecture ───────────────────────────────────────────────────────────────
 # MODE = "resume"  → resume 0.81 checkpoint, channels=(32,64,128,256)
 # MODE = "wider"   → train from scratch, wider channels=(48,96,192,384)
-MODE = "resume"
+MODE = "wider"
 
 if MODE == "resume":
     CHANNELS = (32, 64, 128, 256)
     STRIDES  = (2, 2, 2)
 else:
-    CHANNELS = (48, 96, 192, 384)
+    CHANNELS = (64, 128, 256, 512)
     STRIDES  = (2, 2, 2)
 
 # ── Hyperparameters ────────────────────────────────────────────────────────────
-SPATIAL_SIZE    = (96, 96, 16)
-NUM_EPOCHS      = 300
+SPATIAL_SIZE    = (128, 128, 32)
+NUM_EPOCHS      = 500
 VAL_INTERVAL    = 2
-TRAIN_SAMPLES   = 4
+TRAIN_SAMPLES   = 2
 BATCH_SIZE      = 1
 SW_OVERLAP      = 0.25
-PATIENCE        = 40
+PATIENCE        = 60
 PRED_THRESHOLD  = 0.4    # lower than 0.5 — better recall on thin vessels
 
 
