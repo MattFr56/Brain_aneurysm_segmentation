@@ -4,6 +4,7 @@ import os
 import sys
 from glob import glob
 
+import nibabel as nib
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -15,16 +16,13 @@ from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import train_test_split
 
 import monai
-from monai.transforms import NormalizeIntensityd
-# Replace SpatialPadd with this in BOTH train and val transforms:
-from monai.transforms import ResizeWithPadOrCropd
 from monai.losses import DiceFocalLoss
-from monai.data import CacheDataset, list_data_collate, pad_list_data_collate, decollate_batch
+from monai.data import CacheDataset, pad_list_data_collate, decollate_batch
 from monai.inferers import sliding_window_inference
 from monai.metrics import DiceMetric, HausdorffDistanceMetric
 from monai.networks.nets import AttentionUnet
 from monai.transforms import (
-    Activations, AsDiscrete, Compose, CropForegroundd,
+    Activations, AsDiscrete, Compose,
     EnsureChannelFirstd, Lambdad, LoadImaged, Orientationd,
     RandCropByPosNegLabeld, Rand3DElasticd, RandFlipd,
     RandGaussianNoised, RandRotate90d, RandScaleIntensityd,
@@ -43,15 +41,17 @@ CHECKPOINT      = "/kaggle/working/best_finetune_model.pth"
 CSV_PATH        = "/kaggle/working/finetune_log.csv"
 CURVE_PATH      = "/kaggle/working/finetune_curves.png"
 
-# ── Architecture — must match pretrained .pth ──────────────────────────────────
+# ── Architecture ───────────────────────────────────────────────────────────────
 CHANNELS = (64, 128, 256, 512)
 STRIDES  = (2, 2, 2)
 
-# ── Hyperparameters ────────────────────────────────────────────────────────────
-SPATIAL_SIZE   = (128, 128, 32)
-NUM_EPOCHS     = 100
+# ── Hyperparameters — data-driven from fingerprint ─────────────────────────────
+HU_MIN         = 100    # fg HU p5  combined
+HU_MAX         = 400    # fg HU p95 combined
+SPATIAL_SIZE   = (96, 96, 32)   # fits CoW, gives RandCrop room to move
+NUM_EPOCHS     = 300
 VAL_INTERVAL   = 2
-TRAIN_SAMPLES  = 2
+TRAIN_SAMPLES  = 4      # more patches since volume >> patch now
 BATCH_SIZE     = 1
 SW_OVERLAP     = 0.25
 PATIENCE       = 50
@@ -93,11 +93,12 @@ def plot_curves(csv_path, out_path):
     axes[0].set_xlabel("Epoch"); axes[0].set_ylabel("Loss")
     axes[0].grid(True, alpha=0.3)
 
-    axes[1].plot(val_epochs, dices, color="darkorange", linewidth=1.5, marker="o", markersize=3)
+    axes[1].plot(val_epochs, dices, color="darkorange", linewidth=1.5,
+                 marker="o", markersize=3)
     if dices:
         best_idx = dices.index(max(dices))
-        axes[1].axvline(val_epochs[best_idx], color="red", linestyle="--", alpha=0.6,
-                        label=f"Best {max(dices):.4f} @ ep {val_epochs[best_idx]}")
+        axes[1].axvline(val_epochs[best_idx], color="red", linestyle="--",
+                        alpha=0.6, label=f"Best {max(dices):.4f} @ ep {val_epochs[best_idx]}")
         axes[1].legend(fontsize=8)
     axes[1].set_title("Val Dice"); axes[1].set_xlabel("Epoch")
     axes[1].set_ylim(0, 1); axes[1].grid(True, alpha=0.3)
@@ -105,10 +106,11 @@ def plot_curves(csv_path, out_path):
     valid_hd = [(e, h) for e, h in zip(val_epochs, hd95s) if h is not None]
     if valid_hd:
         hd_ep, hd_vals = zip(*valid_hd)
-        axes[2].plot(hd_ep, hd_vals, color="seagreen", linewidth=1.5, marker="o", markersize=3)
+        axes[2].plot(hd_ep, hd_vals, color="seagreen", linewidth=1.5,
+                     marker="o", markersize=3)
         best_hd_idx = hd_vals.index(min(hd_vals))
-        axes[2].axvline(hd_ep[best_hd_idx], color="red", linestyle="--", alpha=0.6,
-                        label=f"Best {min(hd_vals):.2f}mm @ ep {hd_ep[best_hd_idx]}")
+        axes[2].axvline(hd_ep[best_hd_idx], color="red", linestyle="--",
+                        alpha=0.6, label=f"Best {min(hd_vals):.2f}mm @ ep {hd_ep[best_hd_idx]}")
         axes[2].legend(fontsize=8)
     axes[2].set_title("Val HD95 (mm) ↓"); axes[2].set_xlabel("Epoch")
     axes[2].grid(True, alpha=0.3)
@@ -123,19 +125,31 @@ def main():
     monai.config.print_config()
     logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
-    # ── Data ───────────────────────────────────────────────────────────────────
+    # ── Data — filter bad z-spacing, pair before split ─────────────────────────
     images = sorted(glob(os.path.join(IMAGE_DIR, "*.nii*")))
     segs   = sorted(glob(os.path.join(MASK_DIR,  "*.nii*")))
     assert len(images) == len(segs), f"Mismatch: {len(images)} vs {len(segs)}"
-    print(f"✓ {len(images)} image/mask pairs")
 
-    train_images, val_images, train_masks, val_masks = train_test_split(
-        images, segs, test_size=0.2, random_state=42, shuffle=True
+    all_files = []
+    skipped   = []
+    for i, s in zip(images, segs):
+        hdr       = nib.load(i).header
+        z_spacing = float(hdr.get_zooms()[2])
+        z_slices  = int(hdr.get_data_shape()[2])
+        if z_spacing > 2.0 or z_slices < 16:
+            skipped.append(os.path.basename(i))
+            continue
+        all_files.append({"img": i, "seg": s})
+
+    print(f"✓ {len(all_files)} usable | {len(skipped)} skipped:")
+    for name in skipped:
+        print(f"  SKIP {name}")
+
+    # pair first, then split — preserves img/seg correspondence
+    train_files, val_files = train_test_split(
+        all_files, test_size=0.2, random_state=42, shuffle=True
     )
-    print(f"✓ Train: {len(train_images)} | Val: {len(val_images)}")
-
-    train_files = [{"img": i, "seg": s} for i, s in zip(train_images, train_masks)]
-    val_files   = [{"img": i, "seg": s} for i, s in zip(val_images,   val_masks)]
+    print(f"✓ Train: {len(train_files)} | Val: {len(val_files)}")
 
     # ── Transforms ─────────────────────────────────────────────────────────────
     train_transforms = Compose([
@@ -144,15 +158,17 @@ def main():
         Orientationd(keys=["img", "seg"], axcodes="RAS"),
         Spacingd(keys=["img", "seg"], pixdim=(1.0, 1.0, 1.0),
                  mode=("bilinear", "nearest")),
-        #ScaleIntensityRanged(keys=["img"], a_min=100, a_max=600,
-        #                     b_min=0.0, b_max=1.0, clip=True),
-        NormalizeIntensityd(keys=["img"], nonzero=True, channel_wise=True),
+        ScaleIntensityRanged(keys=["img"],
+                             a_min=HU_MIN, a_max=HU_MAX,
+                             b_min=0.0, b_max=1.0, clip=True),
         Lambdad(keys=["seg"], func=lambda x: (x > 0).float()),
-        ResizeWithPadOrCropd(keys=["img", "seg"], spatial_size=SPATIAL_SIZE),
+        SpatialPadd(keys=["img", "seg"], spatial_size=SPATIAL_SIZE),
         RandCropByPosNegLabeld(
             keys=["img", "seg"], label_key="seg",
-            spatial_size=SPATIAL_SIZE, pos=0.9, neg=0.1,
-            num_samples=TRAIN_SAMPLES, allow_smaller=False,
+            spatial_size=SPATIAL_SIZE,
+            pos=3, neg=1,
+            num_samples=TRAIN_SAMPLES,
+            allow_smaller=False,
         ),
         Rand3DElasticd(keys=["img", "seg"], sigma_range=(3, 5),
                        magnitude_range=(50, 150), prob=0.3,
@@ -173,11 +189,11 @@ def main():
         Orientationd(keys=["img", "seg"], axcodes="RAS"),
         Spacingd(keys=["img", "seg"], pixdim=(1.0, 1.0, 1.0),
                  mode=("bilinear", "nearest")),
-        #ScaleIntensityRanged(keys=["img"], a_min=100, a_max=600,
-        #                     b_min=0.0, b_max=1.0, clip=True),
-        NormalizeIntensityd(keys=["img"], nonzero=True, channel_wise=True),
+        ScaleIntensityRanged(keys=["img"],
+                             a_min=HU_MIN, a_max=HU_MAX,
+                             b_min=0.0, b_max=1.0, clip=True),
         Lambdad(keys=["seg"], func=lambda x: (x > 0).float()),
-        ResizeWithPadOrCropd(keys=["img", "seg"], spatial_size=SPATIAL_SIZE),
+        SpatialPadd(keys=["img", "seg"], spatial_size=SPATIAL_SIZE),
         ToTensord(keys=["img", "seg"]),
     ])
 
@@ -187,29 +203,26 @@ def main():
                             cache_rate=1.0, num_workers=4)
     val_ds   = CacheDataset(data=val_files,   transform=val_transforms,
                             cache_rate=1.0, num_workers=2)
+
+    # ── Sanity checks ──────────────────────────────────────────────────────────
     val_check = monai.utils.misc.first(
-    DataLoader(val_ds, batch_size=1, collate_fn=pad_list_data_collate)
+        DataLoader(val_ds, batch_size=1, collate_fn=pad_list_data_collate)
     )
     print(f"Val img shape: {val_check['img'].shape}")
-    print(f"Val seg shape: {val_check['seg'].shape}")
     print(f"Val seg unique: {val_check['seg'].unique()}")
     print(f"Val seg positive voxels: {(val_check['seg']>0).sum().item()}")
-    
+
     check_loader = DataLoader(train_ds, batch_size=2, num_workers=0,
                               collate_fn=pad_list_data_collate)
     check_data   = monai.utils.misc.first(check_loader)
     img, seg     = check_data["img"], check_data["seg"]
     vessel_vox   = img[seg > 0]
     print(f"Sanity — img: {img.shape} | seg unique: {seg.unique()}")
-    print(f"Vessel intensity mean={vessel_vox.mean():.3f} std={vessel_vox.std():.3f}")
+    if vessel_vox.numel() > 0:
+        print(f"Vessel intensity mean={vessel_vox.mean():.3f} std={vessel_vox.std():.3f}")
     print(f"Vessel voxels: {(seg>0).sum().item()}/{seg.numel()} "
           f"({100*(seg>0).float().mean().item():.2f}%)")
 
-    print("=== VAL SET INTENSITY CHECK ===")
-    for d in val_files[:10]:
-    vol = nib.load(d["img"]).get_fdata()
-    print(f"{os.path.basename(d['img'])}: min={vol.min():.1f} max={vol.max():.1f} mean={vol.mean():.1f}")
-    
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
                               num_workers=4, collate_fn=pad_list_data_collate,
                               pin_memory=torch.cuda.is_available())
@@ -223,7 +236,7 @@ def main():
         channels=CHANNELS, strides=STRIDES,
     ).to(device)
 
-    # Load pretrained
+    # ── Load pretrained ────────────────────────────────────────────────────────
     if not os.path.exists(PRETRAINED_CKPT):
         raise FileNotFoundError(f"Checkpoint not found: {PRETRAINED_CKPT}")
     ckpt  = torch.load(PRETRAINED_CKPT, map_location=device, weights_only=False)
