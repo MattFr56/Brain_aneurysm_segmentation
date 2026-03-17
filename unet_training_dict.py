@@ -184,7 +184,14 @@ def main():
                             cache_rate=1.0, num_workers=4)
     val_ds   = CacheDataset(data=val_files,   transform=val_transforms,
                             cache_rate=1.0, num_workers=2)
-
+    val_check = monai.utils.misc.first(
+    DataLoader(val_ds, batch_size=1, collate_fn=pad_list_data_collate)
+    )
+    print(f"Val img shape: {val_check['img'].shape}")
+    print(f"Val seg shape: {val_check['seg'].shape}")
+    print(f"Val seg unique: {val_check['seg'].unique()}")
+    print(f"Val seg positive voxels: {(val_check['seg']>0).sum().item()}")
+    
     check_loader = DataLoader(train_ds, batch_size=2, num_workers=0,
                               collate_fn=pad_list_data_collate)
     check_data   = monai.utils.misc.first(check_loader)
