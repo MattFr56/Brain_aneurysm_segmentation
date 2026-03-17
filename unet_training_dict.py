@@ -16,6 +16,8 @@ from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import train_test_split
 
 import monai
+from monai.data import pad_list_data_collate
+from monai.transforms import CropForegroundd
 from monai.losses import DiceFocalLoss
 from monai.data import CacheDataset, list_data_collate, decollate_batch
 from monai.inferers import sliding_window_inference
@@ -177,10 +179,11 @@ def main():
         EnsureChannelFirstd(keys=["img", "seg"]),
         Orientationd(keys=["img", "seg"], axcodes="RAS"),
         Spacingd(keys=["img", "seg"], pixdim=(1.0, 1.0, 1.0), mode=("bilinear", "nearest")),
+        CropForegroundd(keys=["img", "seg"], source_key="img"),
         ScaleIntensityRanged(keys=["img"], a_min=100, a_max=600,
                              b_min=0.0, b_max=1.0, clip=True),
         Lambdad(keys=["seg"], func=lambda x: (x > 0).float()),
-        SpatialPadd(keys=["img", "seg"], spatial_size=SPATIAL_SIZE),
+        SpatialPadd(keys=["img", "seg"], spatial_size=SPATIAL_SIZE, mode="constant"),
         RandCropByPosNegLabeld(keys=["img", "seg"], label_key="seg",
                                spatial_size=SPATIAL_SIZE, pos=0.9, neg=0.1,
                                num_samples=TRAIN_SAMPLES, allow_smaller=False),
@@ -215,7 +218,7 @@ def main():
 
     # Sanity check
     check_loader = DataLoader(train_ds, batch_size=2, num_workers=0,
-                              collate_fn=list_data_collate)
+                              collate_fn=pad_list_data_collate)
     check_data   = monai.utils.misc.first(check_loader)
     img, seg     = check_data["img"], check_data["seg"]
     vessel_vox   = img[seg > 0]
