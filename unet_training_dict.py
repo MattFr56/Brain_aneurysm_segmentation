@@ -37,7 +37,7 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 # ── Paths ──────────────────────────────────────────────────────────────────────
 IMAGE_DIR       = "/kaggle/input/datasets/mattfr56/aneursym-set-b/final_volumes"
 MASK_DIR        = "/kaggle/input/datasets/mattfr56/aneursym-set-b/final_labels"
-PRETRAINED_CKPT = "/kaggle/input/cow-pretrained/best_metric_model_3.pth"
+PRETRAINED_CKPT = "/kaggle/working/best_metric_model_3.pth"
 CHECKPOINT      = "/kaggle/working/best_finetune_model.pth"
 CSV_PATH        = "/kaggle/working/finetune_log.csv"
 CURVE_PATH      = "/kaggle/working/finetune_curves.png"
