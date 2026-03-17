@@ -48,7 +48,7 @@ STRIDES  = (2, 2, 2)
 # ── Hyperparameters — data-driven from fingerprint ─────────────────────────────
 HU_MIN         = 100    # fg HU p5  combined
 HU_MAX         = 400    # fg HU p95 combined
-SPATIAL_SIZE   = (96, 96, 32)   # fits CoW, gives RandCrop room to move
+SPATIAL_SIZE   = (96, 96, 24)   # fits CoW, gives RandCrop room to move
 NUM_EPOCHS     = 300
 VAL_INTERVAL   = 2
 TRAIN_SAMPLES  = 4      # more patches since volume >> patch now
