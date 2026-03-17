@@ -155,6 +155,7 @@ def main():
     train_images, val_images, train_masks, val_masks = train_test_split(
         images, segs, test_size=0.2, random_state=42
     )
+    print(f"✓ {val_images}")
     train_files = [{"img": img, "seg": seg} for img, seg in zip(train_images, train_masks)]
     val_files   = [{"img": img, "seg": seg} for img, seg in zip(val_images,   val_masks)]
 
