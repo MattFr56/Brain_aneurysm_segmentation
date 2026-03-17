@@ -313,26 +313,30 @@ def main():
         val_dice = val_hd95 = None
         if (epoch + 1) % VAL_INTERVAL == 0:
             model.eval()
-            with torch.no_grad():
-                for val_data in val_loader:
-                    val_inputs  = val_data["img"].to(device)
-                    val_labels  = val_data["seg"].to(device)
-            
-                    val_outputs = sliding_window_inference(
-                        val_inputs, roi_size=SPATIAL_SIZE, sw_batch_size=4,
-                        predictor=model, overlap=SW_OVERLAP,
-                    )
-                    # post_trans after decollate
-                    val_outputs    = [post_trans(i) for i in decollate_batch(val_outputs)]
-                    val_labels_dec = [i for i in decollate_batch(val_labels)]
-            
-                    # Ensure matching shapes — crop output to label size if needed
-                    for pred, label in zip(val_outputs, val_labels_dec):
-                        if pred.shape != label.shape:
-                            slices = tuple(slice(0, s) for s in label.shape)
-                            pred = pred[slices]
-                        dice_metric(y_pred=pred.unsqueeze(0), y=label.unsqueeze(0))
-                        hd95_metric(y_pred=pred.unsqueeze(0), y=label.unsqueeze(0))
+            import torch.nn.functional as F
+
+        with torch.no_grad():
+            for val_data in val_loader:
+                val_inputs  = val_data["img"].to(device)
+                val_labels  = val_data["seg"].to(device)
+        
+                val_outputs = sliding_window_inference(
+                    val_inputs, roi_size=SPATIAL_SIZE, sw_batch_size=4,
+                    predictor=model, overlap=SW_OVERLAP,
+                )
+        
+                val_outputs    = [post_trans(i) for i in decollate_batch(val_outputs)]
+                val_labels_dec = [i for i in decollate_batch(val_labels)]
+        
+                for pred, label in zip(val_outputs, val_labels_dec):
+                    if pred.shape != label.shape:
+                        pred = F.interpolate(
+                            pred.unsqueeze(0).float(),
+                            size=label.shape[1:],  # (H, W, D)
+                            mode="nearest"
+                        ).squeeze(0)
+                    dice_metric(y_pred=pred.unsqueeze(0), y=label.unsqueeze(0))
+                    hd95_metric(y_pred=pred.unsqueeze(0), y=label.unsqueeze(0))
 
             val_dice = dice_metric.aggregate().item()
             val_hd95 = hd95_metric.aggregate().item()
