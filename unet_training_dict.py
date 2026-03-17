@@ -147,7 +147,7 @@ def main():
     print(f"MODE: {MODE} | channels: {CHANNELS} | spatial_size: {SPATIAL_SIZE}")
 
     # ── Data ───────────────────────────────────────────────────────────────────
-    images = sorted(glob(os.path.join(IMAGE_DIR, "*_0000.nii*")))
+    images = sorted(glob(os.path.join(IMAGE_DIR, "*.nii*")))
     segs   = sorted(glob(os.path.join(MASK_DIR,  "*.nii*")))
     assert len(images) == len(segs), f"Mismatch: {len(images)} vs {len(segs)}"
     print(f"✓ {len(images)} image/mask pairs — paired by sorted order")
