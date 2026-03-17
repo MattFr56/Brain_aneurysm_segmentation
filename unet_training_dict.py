@@ -11,7 +11,6 @@ import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import train_test_split
@@ -35,8 +34,8 @@ from monai.visualize import plot_2d_or_3d_image
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-IMAGE_DIR       = "/kaggle/input/datasets/mattfr56/aneursym-set-b/final_volumes"
-MASK_DIR        = "/kaggle/input/datasets/mattfr56/aneursym-set-b/final_labels"
+IMAGE_DIR = "/kaggle/working/merged/volumes"
+MASK_DIR  = "/kaggle/working/merged/labels"
 PRETRAINED_CKPT = "/kaggle/working/best_metric_model_3.pth"
 CHECKPOINT      = "/kaggle/working/best_finetune_model.pth"
 CSV_PATH        = "/kaggle/working/finetune_log.csv"
@@ -127,31 +126,23 @@ def main():
     logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
     # ── Data — filter bad z-spacing, pair before split ─────────────────────────
+    # Simple glob — works because names are now identical
     images = sorted(glob(os.path.join(IMAGE_DIR, "*.nii*")))
     segs   = sorted(glob(os.path.join(MASK_DIR,  "*.nii*")))
     assert len(images) == len(segs), f"Mismatch: {len(images)} vs {len(segs)}"
-
+    
+    # Filter bad z
     all_files = []
-    skipped   = []
     for i, s in zip(images, segs):
-        hdr       = nib.load(i).header
-        z_spacing = float(hdr.get_zooms()[2])
-        z_slices  = int(hdr.get_data_shape()[2])
-        if z_spacing > 2.0 or z_slices < 16:
-            skipped.append(os.path.basename(i))
+        hdr = nib.load(i).header
+        if float(hdr.get_zooms()[2]) > 2.0 or int(hdr.get_data_shape()[2]) < 16:
             continue
         all_files.append({"img": i, "seg": s})
-
-    print(f"✓ {len(all_files)} usable | {len(skipped)} skipped:")
-    for name in skipped:
-        print(f"  SKIP {name}")
-
-    # pair first, then split — preserves img/seg correspondence
+    
+    # Pair first, split together
     train_files, val_files = train_test_split(
         all_files, test_size=0.2, random_state=42, shuffle=True
     )
-    print(f"✓ Train: {len(train_files)} | Val: {len(val_files)}")
-
     # ── Transforms ─────────────────────────────────────────────────────────────
     train_transforms = Compose([
         LoadImaged(keys=["img", "seg"]),
@@ -163,15 +154,13 @@ def main():
                              a_min=HU_MIN, a_max=HU_MAX,
                              b_min=0.0, b_max=1.0, clip=True),
         Lambdad(keys=["seg"], func=lambda x: (x > 0).float()),
-        SpatialPadd(keys=["img", "seg"], spatial_size=SPATIAL_SIZE),
         RandCropByPosNegLabeld(
             keys=["img", "seg"], label_key="seg",
             spatial_size=SPATIAL_SIZE,
             pos=3, neg=1,
             num_samples=TRAIN_SAMPLES,
-            allow_smaller=True,
+            allow_smaller=False,
         ),
-        SpatialPadd(keys=["img", "seg"], spatial_size=SPATIAL_SIZE),
         Rand3DElasticd(keys=["img", "seg"], sigma_range=(3, 5),
                        magnitude_range=(50, 150), prob=0.3,
                        mode=("bilinear", "nearest")),
@@ -316,33 +305,19 @@ def main():
             model.eval()
             import torch.nn.functional as F
 
-        with torch.no_grad():
+       with torch.no_grad():
             for val_data in val_loader:
                 val_inputs  = val_data["img"].to(device)
                 val_labels  = val_data["seg"].to(device)
-            
+        
                 val_outputs = sliding_window_inference(
                     val_inputs, roi_size=SPATIAL_SIZE, sw_batch_size=4,
                     predictor=model, overlap=SW_OVERLAP,
                 )
-            
                 val_outputs    = [post_trans(i) for i in decollate_batch(val_outputs)]
                 val_labels_dec = [i for i in decollate_batch(val_labels)]
-            
-                for pred, label in zip(val_outputs, val_labels_dec):
-                        # pred:  (1, H, W, D)
-                        # label: (1, H, W, D)
-                        # debug shapes once
-                    if pred.shape != label.shape:
-                        print(f"  shape mismatch: pred={pred.shape} label={label.shape} — resizing")
-                        pred = F.interpolate(
-                            pred.unsqueeze(0).float(),  # → (1, 1, H, W, D)
-                            size=label.shape[1:],        # → (H, W, D) of label
-                            mode="nearest"
-                        ).squeeze(0)                     # → (1, H, W, D)
-                        pred = (pred > 0.5).float()      # re-binarize after interpolate
-                    dice_metric(y_pred=pred.unsqueeze(0), y=label.unsqueeze(0))
-                    hd95_metric(y_pred=pred.unsqueeze(0), y=label.unsqueeze(0))
+                dice_metric(y_pred=val_outputs, y=val_labels_dec)
+                hd95_metric(y_pred=val_outputs, y=val_labels_dec)
 
             val_dice = dice_metric.aggregate().item()
             val_hd95 = hd95_metric.aggregate().item()
