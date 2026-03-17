@@ -17,7 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import train_test_split
 
 import monai
-from monai.losses import DiceFocalLoss
+from monai.losses import TverskyLoss
 from monai.data import CacheDataset, pad_list_data_collate, decollate_batch
 from monai.inferers import sliding_window_inference
 from monai.metrics import DiceMetric, HausdorffDistanceMetric
@@ -35,12 +35,11 @@ from monai.visualize import plot_2d_or_3d_image
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-IMAGE_DIR = "/kaggle/working/merged/volumes"
-MASK_DIR  = "/kaggle/working/merged/labels"
-PRETRAINED_CKPT = "/kaggle/working/best_metric_model_3.pth"
-CHECKPOINT      = "/kaggle/working/best_finetune_model.pth"
-CSV_PATH        = "/kaggle/working/finetune_log.csv"
-CURVE_PATH      = "/kaggle/working/finetune_curves.png"
+IMAGE_DIR  = "/kaggle/working/merged/volumes"
+MASK_DIR   = "/kaggle/working/merged/labels"
+CHECKPOINT = "/kaggle/working/best_model.pth"
+CSV_PATH   = "/kaggle/working/training_log.csv"
+CURVE_PATH = "/kaggle/working/training_curves.png"
 
 # ── Architecture ───────────────────────────────────────────────────────────────
 CHANNELS = (64, 128, 256, 512)
@@ -55,9 +54,28 @@ VAL_INTERVAL   = 2
 TRAIN_SAMPLES  = 4
 BATCH_SIZE     = 1
 SW_OVERLAP     = 0.25
+SW_OVERLAP_VAL = 0.5
 PATIENCE       = 60
 PRED_THRESHOLD = 0.4
 WARMUP_EPOCHS  = 10
+ACCUM_STEPS    = 4
+
+
+# ── TTA ────────────────────────────────────────────────────────────────────────
+TTA_FLIPS = [[], [2], [3], [4], [2,3], [2,4], [3,4], [2,3,4]]
+
+def tta_inference(model, inputs, roi_size, overlap):
+    preds = []
+    for axes in TTA_FLIPS:
+        x    = torch.flip(inputs, axes) if axes else inputs
+        pred = sliding_window_inference(
+            x, roi_size=roi_size, sw_batch_size=8,
+            predictor=model, overlap=overlap,
+        )
+        if axes:
+            pred = torch.flip(pred, axes)
+        preds.append(torch.sigmoid(pred))
+    return torch.mean(torch.stack(preds), dim=0)
 
 
 # ── CSV helpers ────────────────────────────────────────────────────────────────
@@ -91,8 +109,8 @@ def plot_curves(csv_path, out_path):
     fig, axes = plt.subplots(1, 3, figsize=(16, 4))
 
     axes[0].plot(epochs, losses, color="steelblue", linewidth=1.5)
-    axes[0].set_title("Train Loss"); axes[0].set_xlabel("Epoch")
-    axes[0].grid(True, alpha=0.3)
+    axes[0].set_title("Train Loss (Tversky)")
+    axes[0].set_xlabel("Epoch"); axes[0].grid(True, alpha=0.3)
 
     axes[1].plot(val_epochs, dices, color="darkorange", linewidth=1.5,
                  marker="o", markersize=3)
@@ -101,7 +119,7 @@ def plot_curves(csv_path, out_path):
         axes[1].axvline(val_epochs[best_idx], color="red", linestyle="--",
                         alpha=0.6, label=f"Best {max(dices):.4f} @ ep {val_epochs[best_idx]}")
         axes[1].legend(fontsize=8)
-    axes[1].set_title("Val Dice"); axes[1].set_xlabel("Epoch")
+    axes[1].set_title("Val Dice (TTA)"); axes[1].set_xlabel("Epoch")
     axes[1].set_ylim(0, 1); axes[1].grid(True, alpha=0.3)
 
     valid_hd = [(e, h) for e, h in zip(val_epochs, hd95s) if h is not None]
@@ -131,16 +149,14 @@ def main():
     segs   = sorted(glob(os.path.join(MASK_DIR,  "*.nii*")))
     assert len(images) == len(segs), f"Mismatch: {len(images)} vs {len(segs)}"
 
-    # Filter by physical z coverage
     all_files = []
     skipped   = []
     for i, s in zip(images, segs):
-        hdr          = nib.load(i).header
-        zooms        = hdr.get_zooms()
-        shape        = hdr.get_data_shape()
-        z_coverage   = float(zooms[2]) * int(shape[2])
-        z_spacing    = float(zooms[2])
-        if z_spacing > 2.0 or z_coverage < 32.0:
+        hdr        = nib.load(i).header
+        zooms      = hdr.get_zooms()
+        shape      = hdr.get_data_shape()
+        z_coverage = float(zooms[2]) * int(shape[2])
+        if float(zooms[2]) > 2.0 or z_coverage < 32.0:
             skipped.append(os.path.basename(i))
             continue
         all_files.append({"img": i, "seg": s})
@@ -154,10 +170,10 @@ def main():
     )
     print(f"✓ Train: {len(train_files)} | Val: {len(val_files)}")
 
-    # ── Pair check ─────────────────────────────────────────────────────────────
     print("=== First 3 train pairs ===")
     for d in train_files[:3]:
-        print(f"  img: {os.path.basename(d['img'])} | seg: {os.path.basename(d['seg'])}")
+        print(f"  img: {os.path.basename(d['img'])} | "
+              f"seg: {os.path.basename(d['seg'])}")
 
     # ── Transforms ─────────────────────────────────────────────────────────────
     train_transforms = Compose([
@@ -240,12 +256,13 @@ def main():
         model = nn.DataParallel(model)
 
     # ── Loss ───────────────────────────────────────────────────────────────────
-    loss_function = DiceFocalLoss(
-        sigmoid=True, gamma=2.0,
-        lambda_dice=0.5, lambda_focal=0.5,
+    loss_function = TverskyLoss(
+        sigmoid=True,
+        alpha=0.3,
+        beta=0.7,
     )
 
-    # ── Optimizer + warmup cosine scheduler ────────────────────────────────────
+    # ── Optimizer + scheduler ──────────────────────────────────────────────────
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=2e-4, weight_decay=1e-4
     )
@@ -269,8 +286,7 @@ def main():
                              get_not_nans=False)
     hd95_metric = HausdorffDistanceMetric(include_background=False, percentile=95,
                                           reduction="mean", get_not_nans=False)
-    post_trans  = Compose([
-        Activations(sigmoid=True),
+    post_trans = Compose([
         AsDiscrete(threshold=PRED_THRESHOLD),
     ])
 
@@ -289,30 +305,35 @@ def main():
         model.train()
         epoch_loss = 0
         step       = 0
+        optimizer.zero_grad()
 
-        for batch_data in train_loader:
+        for batch_idx, batch_data in enumerate(train_loader):
             step   += 1
             inputs  = batch_data["img"].to(device)
             labels  = batch_data["seg"].to(device)
-            optimizer.zero_grad()
             outputs = model(inputs)
-            loss    = loss_function(outputs, labels)
+            loss    = loss_function(outputs, labels) / ACCUM_STEPS
             loss.backward()
-            # gradient clipping — prevents exploding gradients
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            epoch_loss += loss.item()
+
+            if (batch_idx + 1) % ACCUM_STEPS == 0 or \
+               (batch_idx + 1) == len(train_loader):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+
+            epoch_loss += loss.item() * ACCUM_STEPS
             epoch_len   = max(len(train_ds) // train_loader.batch_size, 1)
-            print(f"  {step}/{epoch_len}  loss: {loss.item():.4f}")
-            writer.add_scalar("train_loss", loss.item(), epoch_len * epoch + step)
+            print(f"  {step}/{epoch_len}  loss: {loss.item()*ACCUM_STEPS:.4f}")
+            writer.add_scalar("train_loss", loss.item() * ACCUM_STEPS,
+                              epoch_len * epoch + step)
 
         epoch_loss /= step
         current_lr  = scheduler.get_last_lr()[0]
         scheduler.step()
         writer.add_scalar("lr", current_lr, epoch + 1)
-        print(f"epoch {epoch + 1} avg loss: {epoch_loss:.4f}  lr: {current_lr:.2e}")
+        print(f"epoch {epoch+1} avg loss: {epoch_loss:.4f}  lr: {current_lr:.2e}")
 
-        # ── Validation ─────────────────────────────────────────────────────────
+        # ── Validation with TTA ────────────────────────────────────────────────
         val_dice = val_hd95 = None
         if (epoch + 1) % VAL_INTERVAL == 0:
             model.eval()
@@ -320,12 +341,14 @@ def main():
                 for val_data in val_loader:
                     val_inputs  = val_data["img"].to(device)
                     val_labels  = val_data["seg"].to(device)
-                    val_outputs = sliding_window_inference(
-                        val_inputs, roi_size=SPATIAL_SIZE, sw_batch_size=4,
-                        predictor=model, overlap=SW_OVERLAP,
-                    )
-                    val_outputs    = [post_trans(i) for i in decollate_batch(val_outputs)]
+
+                    # TTA inference
+                    mean_prob   = tta_inference(model, val_inputs,
+                                               SPATIAL_SIZE, SW_OVERLAP_VAL)
+                    val_outputs = [post_trans(i) for i in
+                                   decollate_batch(mean_prob)]
                     val_labels_dec = [i for i in decollate_batch(val_labels)]
+
                     dice_metric(y_pred=val_outputs, y=val_labels_dec)
                     hd95_metric(y_pred=val_outputs, y=val_labels_dec)
 
@@ -338,7 +361,7 @@ def main():
             writer.add_scalar("val_mean_dice", val_dice, epoch + 1)
             writer.add_scalar("val_hd95",      val_hd95, epoch + 1)
 
-            # Save best Dice checkpoint
+            # Save best Dice
             if val_dice > best_metric:
                 best_metric       = val_dice
                 best_metric_epoch = epoch + 1
@@ -353,13 +376,15 @@ def main():
                     "best_dice":    best_metric,
                     "best_hd95":    val_hd95,
                     "threshold":    PRED_THRESHOLD,
+                    "hu_min":       HU_MIN,
+                    "hu_max":       HU_MAX,
                 }, CHECKPOINT)
                 print("  ✓ saved new best Dice model")
             else:
                 no_improve_count += 1
                 print(f"  no improvement {no_improve_count}/{PATIENCE}")
 
-            # Save best HD95 checkpoint separately
+            # Save best HD95
             if val_hd95 < best_hd95:
                 best_hd95       = val_hd95
                 best_hd95_epoch = epoch + 1
@@ -373,17 +398,22 @@ def main():
                     "best_dice":    val_dice,
                     "best_hd95":    best_hd95,
                     "threshold":    PRED_THRESHOLD,
+                    "hu_min":       HU_MIN,
+                    "hu_max":       HU_MAX,
                 }, CHECKPOINT.replace(".pth", "_hd95.pth"))
-                print(f"  ✓ saved new best HD95 model ({best_hd95:.2f}mm)")
+                print(f"  ✓ saved new best HD95 ({best_hd95:.2f}mm)")
 
             print(f"  val dice: {val_dice:.4f}  hd95: {val_hd95:.2f}mm  |  "
                   f"best dice: {best_metric:.4f} @ ep {best_metric_epoch}  |  "
                   f"best hd95: {best_hd95:.2f}mm @ ep {best_hd95_epoch}")
-            plot_2d_or_3d_image(val_inputs,  epoch + 1, writer, index=0, tag="image")
-            plot_2d_or_3d_image(val_labels,  epoch + 1, writer, index=0, tag="label")
-            plot_2d_or_3d_image(val_outputs, epoch + 1, writer, index=0, tag="output")
+            plot_2d_or_3d_image(val_inputs,  epoch+1, writer, index=0, tag="image")
+            plot_2d_or_3d_image(val_labels,  epoch+1, writer, index=0, tag="label")
+            plot_2d_or_3d_image(
+                [o.unsqueeze(0) for o in val_outputs],
+                epoch+1, writer, index=0, tag="output"
+            )
 
-        append_csv(CSV_PATH, epoch + 1, epoch_loss, val_dice, val_hd95, current_lr)
+        append_csv(CSV_PATH, epoch+1, epoch_loss, val_dice, val_hd95, current_lr)
         plot_curves(CSV_PATH, CURVE_PATH)
 
         if no_improve_count >= PATIENCE:
@@ -393,8 +423,6 @@ def main():
     print(f"\nTraining complete.")
     print(f"Best Dice : {best_metric:.4f} at epoch {best_metric_epoch}")
     print(f"Best HD95 : {best_hd95:.2f}mm at epoch {best_hd95_epoch}")
-    print(f"CSV       → {CSV_PATH}")
-    print(f"Plot      → {CURVE_PATH}")
     writer.close()
 
 
