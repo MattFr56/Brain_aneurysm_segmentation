@@ -64,37 +64,53 @@ NUM_EPOCHS = sum(p["epochs"] for p in PHASES)  # 60 total
 
 
 # ── Freezing helpers ───────────────────────────────────────────────────────────
-def freeze_all(model):
-    for p in model.parameters():
-        p.requires_grad = False
-
 def unfreeze_head(model):
+    """Unfreeze the last conv layer — works for MONAI AttentionUnet."""
     freeze_all(model)
-    for name, p in model.named_parameters():
-        if re.search(r"^out\b|final_conv|conv_final|model\.9", name):
-            p.requires_grad = True
-            print(f"    unfrozen: {name}")
+    # Get all named params, unfreeze the LAST conv weight/bias
+    all_params = list(model.named_parameters())
+    unfrozen = 0
+    for name, p in reversed(all_params):
+        p.requires_grad = True
+        print(f"    unfrozen: {name}")
+        unfrozen += 1
+        if unfrozen >= 2:  # weight + bias of final conv
+            break
+    if unfrozen == 0:
+        raise RuntimeError("unfreeze_head: no parameters found — check model wrapping")
 
 def unfreeze_decoder(model):
+    """Unfreeze roughly the top half of layers (decoder side)."""
     freeze_all(model)
-    for name, p in model.named_parameters():
-        if re.search(r"^out\b|up_|attention|model\.[5-9]", name):
-            p.requires_grad = True
+    all_params = list(model.named_parameters())
+    n = len(all_params)
+    unfrozen = 0
+    for name, p in all_params[n // 2:]:  # second half = decoder
+        p.requires_grad = True
+        unfrozen += 1
+    print(f"    unfrozen {unfrozen} decoder params")
+    if unfrozen == 0:
+        raise RuntimeError("unfreeze_decoder: no parameters found")
 
 def unfreeze_all(model):
+    unfrozen = 0
     for p in model.parameters():
         p.requires_grad = True
+        unfrozen += 1
+    print(f"    unfrozen all {unfrozen} params")
 
 def apply_phase(model, optimizer, phase_cfg):
     {"head": unfreeze_head, "decoder": unfreeze_decoder,
      "all": unfreeze_all}[phase_cfg["unfreeze"]](model)
+    
     trainable = [p for p in model.parameters() if p.requires_grad]
+    if len(trainable) == 0:
+        raise RuntimeError(f"Phase '{phase_cfg['unfreeze']}': 0 trainable params — will crash on backward()")
+    
     optimizer.param_groups[0]["params"] = trainable
     optimizer.param_groups[0]["lr"]     = phase_cfg["lr"]
     n = sum(p.numel() for p in trainable)
-    print(f"  unfreeze='{phase_cfg['unfreeze']}' | lr={phase_cfg['lr']} | "
-          f"trainable params: {n:,}")
-
+    print(f"  unfreeze='{phase_cfg['unfreeze']}' | lr={phase_cfg['lr']} | trainable: {n:,}")
 
 # ── CSV helpers ────────────────────────────────────────────────────────────────
 def init_csv(path):
@@ -246,6 +262,9 @@ def main():
     if not os.path.exists(PRETRAINED_CKPT):
         raise FileNotFoundError(f"Checkpoint not found: {PRETRAINED_CKPT}")
     ckpt  = torch.load(PRETRAINED_CKPT, map_location=device, weights_only=False)
+    print("=== Model layer names ===")
+    for name, _ in model.named_parameters():
+        print(f"  {name}")
     state = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
     missing, unexpected = model.load_state_dict(state, strict=False)
     print(f"✓ Pretrained weights loaded")
