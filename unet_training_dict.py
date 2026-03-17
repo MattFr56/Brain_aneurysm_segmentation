@@ -319,22 +319,27 @@ def main():
             for val_data in val_loader:
                 val_inputs  = val_data["img"].to(device)
                 val_labels  = val_data["seg"].to(device)
-        
+            
                 val_outputs = sliding_window_inference(
                     val_inputs, roi_size=SPATIAL_SIZE, sw_batch_size=4,
                     predictor=model, overlap=SW_OVERLAP,
                 )
-        
+            
                 val_outputs    = [post_trans(i) for i in decollate_batch(val_outputs)]
                 val_labels_dec = [i for i in decollate_batch(val_labels)]
-        
+            
                 for pred, label in zip(val_outputs, val_labels_dec):
+                        # pred:  (1, H, W, D)
+                        # label: (1, H, W, D)
+                        # debug shapes once
                     if pred.shape != label.shape:
+                        print(f"  shape mismatch: pred={pred.shape} label={label.shape} — resizing")
                         pred = F.interpolate(
-                            pred.unsqueeze(0).float(),
-                            size=label.shape[1:],  # (H, W, D)
+                            pred.unsqueeze(0).float(),  # → (1, 1, H, W, D)
+                            size=label.shape[1:],        # → (H, W, D) of label
                             mode="nearest"
-                        ).squeeze(0)
+                        ).squeeze(0)                     # → (1, H, W, D)
+                        pred = (pred > 0.5).float()      # re-binarize after interpolate
                     dice_metric(y_pred=pred.unsqueeze(0), y=label.unsqueeze(0))
                     hd95_metric(y_pred=pred.unsqueeze(0), y=label.unsqueeze(0))
 
