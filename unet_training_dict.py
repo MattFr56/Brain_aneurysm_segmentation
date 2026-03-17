@@ -205,6 +205,11 @@ def main():
     print(f"Vessel voxels: {(seg>0).sum().item()}/{seg.numel()} "
           f"({100*(seg>0).float().mean().item():.2f}%)")
 
+    print("=== VAL SET INTENSITY CHECK ===")
+    for d in val_files[:10]:
+    vol = nib.load(d["img"]).get_fdata()
+    print(f"{os.path.basename(d['img'])}: min={vol.min():.1f} max={vol.max():.1f} mean={vol.mean():.1f}")
+    
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
                               num_workers=4, collate_fn=pad_list_data_collate,
                               pin_memory=torch.cuda.is_available())
