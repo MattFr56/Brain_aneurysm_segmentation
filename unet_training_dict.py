@@ -305,7 +305,7 @@ def main():
             model.eval()
             import torch.nn.functional as F
 
-       with torch.no_grad():
+        with torch.no_grad():
             for val_data in val_loader:
                 val_inputs  = val_data["img"].to(device)
                 val_labels  = val_data["seg"].to(device)
