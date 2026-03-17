@@ -125,14 +125,13 @@ def main():
     segs   = sorted(glob(os.path.join(MASK_DIR,  "*.nii*")))
     assert len(images) == len(segs), f"Mismatch: {len(images)} vs {len(segs)}"
     print(f"✓ {len(images)} image/mask pairs")
-
-    train_images, val_images, train_masks, val_masks = train_test_split(
-        images, segs, test_size=0.2, random_state=42, shuffle=True
+    
+    # pair first, split pairs together
+    all_files = [{"img": i, "seg": s} for i, s in zip(images, segs)]
+    train_files, val_files = train_test_split(
+        all_files, test_size=0.2, random_state=42, shuffle=True
     )
-    print(f"✓ Train: {len(train_images)} | Val: {len(val_images)}")
-
-    train_files = [{"img": i, "seg": s} for i, s in zip(train_images, train_masks)]
-    val_files   = [{"img": i, "seg": s} for i, s in zip(val_images,   val_masks)]
+    print(f"✓ Train: {len(train_files)} | Val: {len(val_files)}")
 
     # ── Transforms ─────────────────────────────────────────────────────────────
     train_transforms = Compose([
