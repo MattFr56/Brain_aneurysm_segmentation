@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import train_test_split
@@ -26,7 +27,7 @@ from monai.transforms import (
     EnsureChannelFirstd, Lambdad, LoadImaged, Orientationd,
     RandCropByPosNegLabeld, Rand3DElasticd, RandFlipd,
     RandGaussianNoised, RandRotate90d, RandScaleIntensityd,
-    RandShiftIntensityd, ScaleIntensityRanged, Spacingd,
+    RandShiftIntensityd, RandZoomd, ScaleIntensityRanged, Spacingd,
     SpatialPadd, ToTensord,
 )
 from monai.visualize import plot_2d_or_3d_image
@@ -45,17 +46,18 @@ CURVE_PATH      = "/kaggle/working/finetune_curves.png"
 CHANNELS = (64, 128, 256, 512)
 STRIDES  = (2, 2, 2)
 
-# ── Hyperparameters — data-driven from fingerprint ─────────────────────────────
-HU_MIN         = 100    # fg HU p5  combined
-HU_MAX         = 400    # fg HU p95 combined
-SPATIAL_SIZE   = (96, 96, 24)   # fits CoW, gives RandCrop room to move
-NUM_EPOCHS     = 300
+# ── Hyperparameters ────────────────────────────────────────────────────────────
+HU_MIN         = 100
+HU_MAX         = 400
+SPATIAL_SIZE   = (128, 128, 32)
+NUM_EPOCHS     = 500
 VAL_INTERVAL   = 2
-TRAIN_SAMPLES  = 8     # more patches since volume >> patch now
+TRAIN_SAMPLES  = 4
 BATCH_SIZE     = 1
 SW_OVERLAP     = 0.25
-PATIENCE       = 50
+PATIENCE       = 60
 PRED_THRESHOLD = 0.4
+WARMUP_EPOCHS  = 10
 
 
 # ── CSV helpers ────────────────────────────────────────────────────────────────
@@ -89,8 +91,7 @@ def plot_curves(csv_path, out_path):
     fig, axes = plt.subplots(1, 3, figsize=(16, 4))
 
     axes[0].plot(epochs, losses, color="steelblue", linewidth=1.5)
-    axes[0].set_title("Train Loss (DiceFocal)")
-    axes[0].set_xlabel("Epoch"); axes[0].set_ylabel("Loss")
+    axes[0].set_title("Train Loss"); axes[0].set_xlabel("Epoch")
     axes[0].grid(True, alpha=0.3)
 
     axes[1].plot(val_epochs, dices, color="darkorange", linewidth=1.5,
@@ -125,24 +126,39 @@ def main():
     monai.config.print_config()
     logging.basicConfig(stream=sys.stdout, level=logging.INFO)
 
-    # ── Data — filter bad z-spacing, pair before split ─────────────────────────
-    # Simple glob — works because names are now identical
+    # ── Data ───────────────────────────────────────────────────────────────────
     images = sorted(glob(os.path.join(IMAGE_DIR, "*.nii*")))
     segs   = sorted(glob(os.path.join(MASK_DIR,  "*.nii*")))
     assert len(images) == len(segs), f"Mismatch: {len(images)} vs {len(segs)}"
-    
-    # Filter bad z
+
+    # Filter by physical z coverage
     all_files = []
+    skipped   = []
     for i, s in zip(images, segs):
-        hdr = nib.load(i).header
-        if float(hdr.get_zooms()[2]) > 2.0 or int(hdr.get_data_shape()[2]) < 16:
+        hdr          = nib.load(i).header
+        zooms        = hdr.get_zooms()
+        shape        = hdr.get_data_shape()
+        z_coverage   = float(zooms[2]) * int(shape[2])
+        z_spacing    = float(zooms[2])
+        if z_spacing > 2.0 or z_coverage < 32.0:
+            skipped.append(os.path.basename(i))
             continue
         all_files.append({"img": i, "seg": s})
-    
-    # Pair first, split together
+
+    print(f"✓ {len(all_files)} usable | {len(skipped)} skipped")
+    for name in skipped:
+        print(f"  SKIP {name}")
+
     train_files, val_files = train_test_split(
         all_files, test_size=0.2, random_state=42, shuffle=True
     )
+    print(f"✓ Train: {len(train_files)} | Val: {len(val_files)}")
+
+    # ── Pair check ─────────────────────────────────────────────────────────────
+    print("=== First 3 train pairs ===")
+    for d in train_files[:3]:
+        print(f"  img: {os.path.basename(d['img'])} | seg: {os.path.basename(d['seg'])}")
+
     # ── Transforms ─────────────────────────────────────────────────────────────
     train_transforms = Compose([
         LoadImaged(keys=["img", "seg"]),
@@ -162,6 +178,9 @@ def main():
             allow_smaller=True,
         ),
         SpatialPadd(keys=["img", "seg"], spatial_size=SPATIAL_SIZE),
+        RandZoomd(keys=["img", "seg"],
+                  min_zoom=0.85, max_zoom=1.15,
+                  mode=("trilinear", "nearest"), prob=0.3),
         Rand3DElasticd(keys=["img", "seg"], sigma_range=(3, 5),
                        magnitude_range=(50, 150), prob=0.3,
                        mode=("bilinear", "nearest")),
@@ -185,7 +204,6 @@ def main():
                              a_min=HU_MIN, a_max=HU_MAX,
                              b_min=0.0, b_max=1.0, clip=True),
         Lambdad(keys=["seg"], func=lambda x: (x > 0).float()),
-        # ← NO SpatialPadd here — let sliding window handle full volume
         ToTensord(keys=["img", "seg"]),
     ])
 
@@ -196,24 +214,13 @@ def main():
     val_ds   = CacheDataset(data=val_files,   transform=val_transforms,
                             cache_rate=1.0, num_workers=2)
 
-    # ── Sanity checks ──────────────────────────────────────────────────────────
+    # ── Sanity check ───────────────────────────────────────────────────────────
     val_check = monai.utils.misc.first(
         DataLoader(val_ds, batch_size=1, collate_fn=pad_list_data_collate)
     )
-    print(f"Val img shape: {val_check['img'].shape}")
+    print(f"Val img shape : {val_check['img'].shape}")
     print(f"Val seg unique: {val_check['seg'].unique()}")
-    print(f"Val seg positive voxels: {(val_check['seg']>0).sum().item()}")
-
-    check_loader = DataLoader(train_ds, batch_size=2, num_workers=0,
-                              collate_fn=pad_list_data_collate)
-    check_data   = monai.utils.misc.first(check_loader)
-    img, seg     = check_data["img"], check_data["seg"]
-    vessel_vox   = img[seg > 0]
-    print(f"Sanity — img: {img.shape} | seg unique: {seg.unique()}")
-    if vessel_vox.numel() > 0:
-        print(f"Vessel intensity mean={vessel_vox.mean():.3f} std={vessel_vox.std():.3f}")
-    print(f"Vessel voxels: {(seg>0).sum().item()}/{seg.numel()} "
-          f"({100*(seg>0).float().mean().item():.2f}%)")
+    print(f"Val seg fg vox: {(val_check['seg']>0).sum().item()}")
 
     train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,
                               num_workers=4, collate_fn=pad_list_data_collate,
@@ -228,33 +235,33 @@ def main():
         channels=CHANNELS, strides=STRIDES,
     ).to(device)
 
-    # ── Load pretrained ────────────────────────────────────────────────────────
-    if not os.path.exists(PRETRAINED_CKPT):
-        raise FileNotFoundError(f"Checkpoint not found: {PRETRAINED_CKPT}")
-    ckpt  = torch.load(PRETRAINED_CKPT, map_location=device, weights_only=False)
-    state = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
-    missing, unexpected = model.load_state_dict(state, strict=False)
-    best_metric = ckpt.get("best_dice", ckpt.get("best_metric", -1)) \
-                  if isinstance(ckpt, dict) else -1
-    print(f"✓ Pretrained loaded — starting from Dice {best_metric:.4f}")
-    if missing:    print(f"  Missing:    {missing}")
-    if unexpected: print(f"  Unexpected: {unexpected}")
-
     if torch.cuda.device_count() > 1:
         print(f"  DataParallel on {torch.cuda.device_count()} GPUs")
         model = nn.DataParallel(model)
 
-    # ── Loss, optimizer, schedulers ────────────────────────────────────────────
+    # ── Loss ───────────────────────────────────────────────────────────────────
     loss_function = DiceFocalLoss(
         sigmoid=True, gamma=2.0,
         lambda_dice=0.5, lambda_focal=0.5,
     )
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-5)
-    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=NUM_EPOCHS, eta_min=1e-6
+
+    # ── Optimizer + warmup cosine scheduler ────────────────────────────────────
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=2e-4, weight_decay=1e-4
+    )
+    warmup_scheduler = LinearLR(
+        optimizer, start_factor=0.1, total_iters=WARMUP_EPOCHS
+    )
+    cosine_scheduler = CosineAnnealingLR(
+        optimizer, T_max=NUM_EPOCHS - WARMUP_EPOCHS, eta_min=1e-6
+    )
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[WARMUP_EPOCHS]
     )
     plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.5, patience=8
+        optimizer, mode="max", factor=0.5, patience=10
     )
 
     # ── Metrics ────────────────────────────────────────────────────────────────
@@ -269,7 +276,10 @@ def main():
 
     init_csv(CSV_PATH)
     writer            = SummaryWriter()
+    best_metric       = -1
+    best_hd95         = float("inf")
     best_metric_epoch = -1
+    best_hd95_epoch   = -1
     no_improve_count  = 0
 
     # ── Training loop ──────────────────────────────────────────────────────────
@@ -288,6 +298,8 @@ def main():
             outputs = model(inputs)
             loss    = loss_function(outputs, labels)
             loss.backward()
+            # gradient clipping — prevents exploding gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             epoch_loss += loss.item()
             epoch_len   = max(len(train_ds) // train_loader.batch_size, 1)
@@ -295,8 +307,8 @@ def main():
             writer.add_scalar("train_loss", loss.item(), epoch_len * epoch + step)
 
         epoch_loss /= step
-        current_lr  = cosine_scheduler.get_last_lr()[0]
-        cosine_scheduler.step()
+        current_lr  = scheduler.get_last_lr()[0]
+        scheduler.step()
         writer.add_scalar("lr", current_lr, epoch + 1)
         print(f"epoch {epoch + 1} avg loss: {epoch_loss:.4f}  lr: {current_lr:.2e}")
 
@@ -304,21 +316,18 @@ def main():
         val_dice = val_hd95 = None
         if (epoch + 1) % VAL_INTERVAL == 0:
             model.eval()
-            import torch.nn.functional as F
-
-        with torch.no_grad():
-            for val_data in val_loader:
-                val_inputs  = val_data["img"].to(device)
-                val_labels  = val_data["seg"].to(device)
-        
-                val_outputs = sliding_window_inference(
-                    val_inputs, roi_size=SPATIAL_SIZE, sw_batch_size=4,
-                    predictor=model, overlap=SW_OVERLAP,
-                )
-                val_outputs    = [post_trans(i) for i in decollate_batch(val_outputs)]
-                val_labels_dec = [i for i in decollate_batch(val_labels)]
-                dice_metric(y_pred=val_outputs, y=val_labels_dec)
-                hd95_metric(y_pred=val_outputs, y=val_labels_dec)
+            with torch.no_grad():
+                for val_data in val_loader:
+                    val_inputs  = val_data["img"].to(device)
+                    val_labels  = val_data["seg"].to(device)
+                    val_outputs = sliding_window_inference(
+                        val_inputs, roi_size=SPATIAL_SIZE, sw_batch_size=4,
+                        predictor=model, overlap=SW_OVERLAP,
+                    )
+                    val_outputs    = [post_trans(i) for i in decollate_batch(val_outputs)]
+                    val_labels_dec = [i for i in decollate_batch(val_labels)]
+                    dice_metric(y_pred=val_outputs, y=val_labels_dec)
+                    hd95_metric(y_pred=val_outputs, y=val_labels_dec)
 
             val_dice = dice_metric.aggregate().item()
             val_hd95 = hd95_metric.aggregate().item()
@@ -329,6 +338,7 @@ def main():
             writer.add_scalar("val_mean_dice", val_dice, epoch + 1)
             writer.add_scalar("val_hd95",      val_hd95, epoch + 1)
 
+            # Save best Dice checkpoint
             if val_dice > best_metric:
                 best_metric       = val_dice
                 best_metric_epoch = epoch + 1
@@ -344,13 +354,31 @@ def main():
                     "best_hd95":    val_hd95,
                     "threshold":    PRED_THRESHOLD,
                 }, CHECKPOINT)
-                print("  ✓ saved new best model")
+                print("  ✓ saved new best Dice model")
             else:
                 no_improve_count += 1
                 print(f"  no improvement {no_improve_count}/{PATIENCE}")
 
+            # Save best HD95 checkpoint separately
+            if val_hd95 < best_hd95:
+                best_hd95       = val_hd95
+                best_hd95_epoch = epoch + 1
+                raw_model = model.module if hasattr(model, "module") else model
+                torch.save({
+                    "state_dict":   raw_model.state_dict(),
+                    "channels":     CHANNELS,
+                    "strides":      STRIDES,
+                    "spatial_size": SPATIAL_SIZE,
+                    "epoch":        epoch + 1,
+                    "best_dice":    val_dice,
+                    "best_hd95":    best_hd95,
+                    "threshold":    PRED_THRESHOLD,
+                }, CHECKPOINT.replace(".pth", "_hd95.pth"))
+                print(f"  ✓ saved new best HD95 model ({best_hd95:.2f}mm)")
+
             print(f"  val dice: {val_dice:.4f}  hd95: {val_hd95:.2f}mm  |  "
-                  f"best: {best_metric:.4f} @ epoch {best_metric_epoch}")
+                  f"best dice: {best_metric:.4f} @ ep {best_metric_epoch}  |  "
+                  f"best hd95: {best_hd95:.2f}mm @ ep {best_hd95_epoch}")
             plot_2d_or_3d_image(val_inputs,  epoch + 1, writer, index=0, tag="image")
             plot_2d_or_3d_image(val_labels,  epoch + 1, writer, index=0, tag="label")
             plot_2d_or_3d_image(val_outputs, epoch + 1, writer, index=0, tag="output")
@@ -362,8 +390,9 @@ def main():
             print(f"\nEarly stopping — no improvement for {PATIENCE} val checks")
             break
 
-    print(f"\nFine-tuning complete.")
+    print(f"\nTraining complete.")
     print(f"Best Dice : {best_metric:.4f} at epoch {best_metric_epoch}")
+    print(f"Best HD95 : {best_hd95:.2f}mm at epoch {best_hd95_epoch}")
     print(f"CSV       → {CSV_PATH}")
     print(f"Plot      → {CURVE_PATH}")
     writer.close()
