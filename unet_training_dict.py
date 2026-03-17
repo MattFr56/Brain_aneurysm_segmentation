@@ -64,33 +64,42 @@ NUM_EPOCHS = sum(p["epochs"] for p in PHASES)  # 60 total
 
 
 # ── Freezing helpers ───────────────────────────────────────────────────────────
+def freeze_all(model):
+    for p in model.parameters():
+        p.requires_grad = False
+
 def unfreeze_head(model):
-    """Unfreeze the last conv layer — works for MONAI AttentionUnet."""
+    """model.2 — final 1x1 conv, weight + bias only."""
     freeze_all(model)
-    # Get all named params, unfreeze the LAST conv weight/bias
-    all_params = list(model.named_parameters())
-    unfrozen = 0
-    for name, p in reversed(all_params):
-        p.requires_grad = True
-        print(f"    unfrozen: {name}")
-        unfrozen += 1
-        if unfrozen >= 2:  # weight + bias of final conv
-            break
-    if unfrozen == 0:
-        raise RuntimeError("unfreeze_head: no parameters found — check model wrapping")
+    for name, p in model.named_parameters():
+        if name.startswith("model.2"):
+            p.requires_grad = True
+            print(f"    unfrozen: {name}")
 
 def unfreeze_decoder(model):
-    """Unfreeze roughly the top half of layers (decoder side)."""
+    """
+    Decoder = attention gates + upconv + merge blocks at each level.
+    These all live in model.1.* but NOT in model.1.submodule.X.submodule.*
+    i.e. the upsampling path back toward the surface.
+    """
     freeze_all(model)
-    all_params = list(model.named_parameters())
-    n = len(all_params)
+    decoder_patterns = [
+        "model.2",                                      # head
+        "model.1.attention", "model.1.upconv",          # decoder level 1
+        "model.1.merge",
+        "model.1.submodule.1.attention",                # decoder level 2
+        "model.1.submodule.1.upconv",
+        "model.1.submodule.1.merge",
+        "model.1.submodule.1.submodule.1.attention",    # decoder level 3
+        "model.1.submodule.1.submodule.1.upconv",
+        "model.1.submodule.1.submodule.1.merge",
+    ]
     unfrozen = 0
-    for name, p in all_params[n // 2:]:  # second half = decoder
-        p.requires_grad = True
-        unfrozen += 1
+    for name, p in model.named_parameters():
+        if any(name.startswith(pat) for pat in decoder_patterns):
+            p.requires_grad = True
+            unfrozen += 1
     print(f"    unfrozen {unfrozen} decoder params")
-    if unfrozen == 0:
-        raise RuntimeError("unfreeze_decoder: no parameters found")
 
 def unfreeze_all(model):
     unfrozen = 0
@@ -102,16 +111,16 @@ def unfreeze_all(model):
 def apply_phase(model, optimizer, phase_cfg):
     {"head": unfreeze_head, "decoder": unfreeze_decoder,
      "all": unfreeze_all}[phase_cfg["unfreeze"]](model)
-    
+
     trainable = [p for p in model.parameters() if p.requires_grad]
     if len(trainable) == 0:
-        raise RuntimeError(f"Phase '{phase_cfg['unfreeze']}': 0 trainable params — will crash on backward()")
-    
+        raise RuntimeError(f"Phase '{phase_cfg['unfreeze']}': 0 trainable params")
+
     optimizer.param_groups[0]["params"] = trainable
     optimizer.param_groups[0]["lr"]     = phase_cfg["lr"]
     n = sum(p.numel() for p in trainable)
     print(f"  unfreeze='{phase_cfg['unfreeze']}' | lr={phase_cfg['lr']} | trainable: {n:,}")
-
+```
 # ── CSV helpers ────────────────────────────────────────────────────────────────
 def init_csv(path):
     with open(path, "w", newline="") as f:
@@ -262,9 +271,9 @@ def main():
     if not os.path.exists(PRETRAINED_CKPT):
         raise FileNotFoundError(f"Checkpoint not found: {PRETRAINED_CKPT}")
     ckpt  = torch.load(PRETRAINED_CKPT, map_location=device, weights_only=False)
-    print("=== Model layer names ===")
-    for name, _ in model.named_parameters():
-        print(f"  {name}")
+    #print("=== Model layer names ===")
+    #for name, _ in model.named_parameters():
+    #print(f"  {name}")
     state = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
     missing, unexpected = model.load_state_dict(state, strict=False)
     print(f"✓ Pretrained weights loaded")
