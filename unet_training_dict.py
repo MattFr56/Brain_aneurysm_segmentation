@@ -120,7 +120,6 @@ def apply_phase(model, optimizer, phase_cfg):
     optimizer.param_groups[0]["lr"]     = phase_cfg["lr"]
     n = sum(p.numel() for p in trainable)
     print(f"  unfreeze='{phase_cfg['unfreeze']}' | lr={phase_cfg['lr']} | trainable: {n:,}")
-```
 # ── CSV helpers ────────────────────────────────────────────────────────────────
 def init_csv(path):
     with open(path, "w", newline="") as f:
