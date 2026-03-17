@@ -166,7 +166,7 @@ def main():
     train_images, val_images, train_masks, val_masks = train_test_split(
         images, segs, test_size=0.2, random_state=42, shuffle=True
     )
-    print(f"✓ Train: {len(train_images)} | Val: {len(val_images)}")
+    print(f"✓ Train: {val_images} | Val: {val_masks}")
 
     train_files = [{"img": i, "seg": s} for i, s in zip(train_images, train_masks)]
     val_files   = [{"img": i, "seg": s} for i, s in zip(val_images,   val_masks)]
