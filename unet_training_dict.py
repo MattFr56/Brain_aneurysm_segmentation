@@ -148,19 +148,17 @@ def main():
     images = sorted(glob(os.path.join(IMAGE_DIR, "*.nii*")))
     segs   = sorted(glob(os.path.join(MASK_DIR,  "*.nii*")))
     assert len(images) == len(segs), f"Mismatch: {len(images)} vs {len(segs)}"
-
+    
     all_files = []
     skipped   = []
     for i, s in zip(images, segs):
-        hdr        = nib.load(i).header
-        zooms      = hdr.get_zooms()
-        shape      = hdr.get_data_shape()
-        z_coverage = float(zooms[2]) * int(shape[2])
-        if float(zooms[2]) > 2.0 or z_coverage < 32.0:
+        hdr       = nib.load(i).header
+        z_spacing = float(hdr.get_zooms()[2])
+        if z_spacing > 2.0:
             skipped.append(os.path.basename(i))
             continue
         all_files.append({"img": i, "seg": s})
-
+    
     print(f"✓ {len(all_files)} usable | {len(skipped)} skipped")
     for name in skipped:
         print(f"  SKIP {name}")
