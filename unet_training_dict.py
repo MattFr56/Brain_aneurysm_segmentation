@@ -15,6 +15,8 @@ from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import train_test_split
 
 import monai
+# Replace SpatialPadd with this in BOTH train and val transforms:
+from monai.transforms import ResizeWithPadOrCropd
 from monai.losses import DiceFocalLoss
 from monai.data import CacheDataset, list_data_collate, pad_list_data_collate, decollate_batch
 from monai.inferers import sliding_window_inference
@@ -144,7 +146,7 @@ def main():
         ScaleIntensityRanged(keys=["img"], a_min=100, a_max=600,
                              b_min=0.0, b_max=1.0, clip=True),
         Lambdad(keys=["seg"], func=lambda x: (x > 0).float()),
-        SpatialPadd(keys=["img", "seg"], spatial_size=SPATIAL_SIZE),
+        ResizeWithPadOrCropd(keys=["img", "seg"], spatial_size=SPATIAL_SIZE),
         RandCropByPosNegLabeld(
             keys=["img", "seg"], label_key="seg",
             spatial_size=SPATIAL_SIZE, pos=0.9, neg=0.1,
@@ -172,7 +174,7 @@ def main():
         ScaleIntensityRanged(keys=["img"], a_min=100, a_max=600,
                              b_min=0.0, b_max=1.0, clip=True),
         Lambdad(keys=["seg"], func=lambda x: (x > 0).float()),
-        SpatialPadd(keys=["img", "seg"], spatial_size=SPATIAL_SIZE),
+        ResizeWithPadOrCropd(keys=["img", "seg"], spatial_size=SPATIAL_SIZE),
         ToTensord(keys=["img", "seg"]),
     ])
 
