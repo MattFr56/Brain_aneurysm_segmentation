@@ -194,7 +194,7 @@ def main():
                              a_min=HU_MIN, a_max=HU_MAX,
                              b_min=0.0, b_max=1.0, clip=True),
         Lambdad(keys=["seg"], func=lambda x: (x > 0).float()),
-        SpatialPadd(keys=["img", "seg"], spatial_size=SPATIAL_SIZE),
+        # ← NO SpatialPadd here — let sliding window handle full volume
         ToTensord(keys=["img", "seg"]),
     ])
 
@@ -317,14 +317,22 @@ def main():
                 for val_data in val_loader:
                     val_inputs  = val_data["img"].to(device)
                     val_labels  = val_data["seg"].to(device)
+            
                     val_outputs = sliding_window_inference(
                         val_inputs, roi_size=SPATIAL_SIZE, sw_batch_size=4,
                         predictor=model, overlap=SW_OVERLAP,
                     )
+                    # post_trans after decollate
                     val_outputs    = [post_trans(i) for i in decollate_batch(val_outputs)]
                     val_labels_dec = [i for i in decollate_batch(val_labels)]
-                    dice_metric(y_pred=val_outputs, y=val_labels_dec)
-                    hd95_metric(y_pred=val_outputs, y=val_labels_dec)
+            
+                    # Ensure matching shapes — crop output to label size if needed
+                    for pred, label in zip(val_outputs, val_labels_dec):
+                        if pred.shape != label.shape:
+                            slices = tuple(slice(0, s) for s in label.shape)
+                            pred = pred[slices]
+                        dice_metric(y_pred=pred.unsqueeze(0), y=label.unsqueeze(0))
+                        hd95_metric(y_pred=pred.unsqueeze(0), y=label.unsqueeze(0))
 
             val_dice = dice_metric.aggregate().item()
             val_hd95 = hd95_metric.aggregate().item()
