@@ -15,6 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import train_test_split
 
 import monai
+from monai.transforms import NormalizeIntensityd
 # Replace SpatialPadd with this in BOTH train and val transforms:
 from monai.transforms import ResizeWithPadOrCropd
 from monai.losses import DiceFocalLoss
@@ -143,8 +144,9 @@ def main():
         Orientationd(keys=["img", "seg"], axcodes="RAS"),
         Spacingd(keys=["img", "seg"], pixdim=(1.0, 1.0, 1.0),
                  mode=("bilinear", "nearest")),
-        ScaleIntensityRanged(keys=["img"], a_min=100, a_max=600,
-                             b_min=0.0, b_max=1.0, clip=True),
+        #ScaleIntensityRanged(keys=["img"], a_min=100, a_max=600,
+        #                     b_min=0.0, b_max=1.0, clip=True),
+        NormalizeIntensityd(keys=["img"], nonzero=True, channel_wise=True),
         Lambdad(keys=["seg"], func=lambda x: (x > 0).float()),
         ResizeWithPadOrCropd(keys=["img", "seg"], spatial_size=SPATIAL_SIZE),
         RandCropByPosNegLabeld(
@@ -171,8 +173,9 @@ def main():
         Orientationd(keys=["img", "seg"], axcodes="RAS"),
         Spacingd(keys=["img", "seg"], pixdim=(1.0, 1.0, 1.0),
                  mode=("bilinear", "nearest")),
-        ScaleIntensityRanged(keys=["img"], a_min=100, a_max=600,
-                             b_min=0.0, b_max=1.0, clip=True),
+        #ScaleIntensityRanged(keys=["img"], a_min=100, a_max=600,
+        #                     b_min=0.0, b_max=1.0, clip=True),
+        NormalizeIntensityd(keys=["img"], nonzero=True, channel_wise=True),
         Lambdad(keys=["seg"], func=lambda x: (x > 0).float()),
         ResizeWithPadOrCropd(keys=["img", "seg"], spatial_size=SPATIAL_SIZE),
         ToTensord(keys=["img", "seg"]),
