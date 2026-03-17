@@ -204,9 +204,11 @@ def main():
         EnsureChannelFirstd(keys=["img", "seg"]),
         Orientationd(keys=["img", "seg"], axcodes="RAS"),
         Spacingd(keys=["img", "seg"], pixdim=(1.0, 1.0, 1.0), mode=("bilinear", "nearest")),
+        CropForegroundd(keys=["img", "seg"], source_key="img"),
         ScaleIntensityRanged(keys=["img"], a_min=100, a_max=600,
                              b_min=0.0, b_max=1.0, clip=True),
         Lambdad(keys=["seg"], func=lambda x: (x > 0).float()),
+        SpatialPadd(keys=["img", "seg"], spatial_size=SPATIAL_SIZE, mode="constant"),
         ToTensord(keys=["img", "seg"]),
     ])
 
