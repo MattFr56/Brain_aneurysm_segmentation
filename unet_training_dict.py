@@ -45,9 +45,9 @@ from monai.visualize import plot_2d_or_3d_image
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-IMAGE_DIR  = "/kaggle/input/datasets/lorfr56/cropped-brain-vessels/cropped_topcow_volumes"
-MASK_DIR   = "/kaggle/input/datasets/lorfr56/cropped-brain-vessels/cropped_topcow_labels"
-CHECKPOINT = "/kaggle/working/best_metric_model_3.pth"
+IMAGE_DIR  = "/kaggle/input/datasets/mattfr56/aneursym-set-b/final_volumes"
+MASK_DIR   = "/kaggle/input/datasets/mattfr56/aneursym-set-b/final_labels"
+CHECKPOINT = "/kaggle/working/best_metric_model_4.pth"
 CSV_PATH   = "/kaggle/working/training_log.csv"
 CURVE_PATH = "/kaggle/working/training_curves.png"
 
