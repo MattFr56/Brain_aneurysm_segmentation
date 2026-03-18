@@ -15,9 +15,9 @@ from monai.transforms import (
 )
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-IMAGE_DIR    = "/kaggle/input/datasets/lorfr56/cropped-brain-vessels/inference_data"
-OUTPUT_DIR   = "/kaggle/working/predictions"
-CHECKPOINT_1 = "/kaggle/working/best_model.pth"
+IMAGE_DIR    = "/content/data"
+OUTPUT_DIR   = "/content/output"
+CHECKPOINT_1 = "/content/best_model.pth"
 CHECKPOINT_2 = None  # optional second model for ensemble
 SW_BATCH     = 8
 SW_OVERLAP   = 0.5   # matches val overlap for consistent results
