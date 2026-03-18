@@ -52,15 +52,15 @@ STRIDES  = (2, 2, 2)
 HU_MIN         = 100
 HU_MAX         = 400
 SPATIAL_SIZE   = (128, 128, 32)
-NUM_EPOCHS     = 100        # ← was 500
+NUM_EPOCHS     = 200        # ← was 500
 VAL_INTERVAL   = 2
 TRAIN_SAMPLES  = 4
 BATCH_SIZE     = 1
 SW_OVERLAP     = 0.25
 SW_OVERLAP_VAL = 0.5
-PATIENCE       = 40         # ← was 60
+PATIENCE       = 30         # ← was 60
 PRED_THRESHOLD = 0.4
-WARMUP_EPOCHS  = 10
+WARMUP_EPOCHS  = 0
 ACCUM_STEPS    = 4
 TTA_INTERVAL   = 10         # ← new: TTA only every 10 epochs
 
@@ -253,6 +253,16 @@ def main():
         channels=CHANNELS, strides=STRIDES,
     ).to(device)
 
+    PRETRAINED_CKPT = "/kaggle/working/best_model.pth"
+    ckpt  = torch.load(PRETRAINED_CKPT, map_location=device, weights_only=False)
+    state = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    best_metric = ckpt.get("best_dice", -1)
+    best_hd95   = ckpt.get("best_hd95", float("inf"))
+    print(f"✓ Resumed from Dice {best_metric:.4f} HD95 {best_hd95:.2f}mm")
+    if missing:    print(f"  Missing:    {missing}")
+    if unexpected: print(f"  Unexpected: {unexpected}")
+        
     if torch.cuda.device_count() > 1:
         print(f"  DataParallel on {torch.cuda.device_count()} GPUs")
         model = nn.DataParallel(model)
@@ -266,18 +276,16 @@ def main():
 
     # ── Optimizer + scheduler ──────────────────────────────────────────────────
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=2e-4, weight_decay=1e-4
+        model.parameters(), lr=5e-5, weight_decay=1e-4
     )
-    warmup_scheduler = LinearLR(
-        optimizer, start_factor=0.1, total_iters=WARMUP_EPOCHS
-    )
-    cosine_scheduler = CosineAnnealingLR(
-        optimizer, T_max=NUM_EPOCHS - WARMUP_EPOCHS, eta_min=1e-6
-    )
-    scheduler = SequentialLR(
-        optimizer,
-        schedulers=[warmup_scheduler, cosine_scheduler],
-        milestones=[WARMUP_EPOCHS]
+    #warmup_scheduler = LinearLR(
+    #    optimizer, start_factor=0.1, total_iters=WARMUP_EPOCHS
+    #)
+    #cosine_scheduler = CosineAnnealingLR(
+    #    optimizer, T_max=NUM_EPOCHS - WARMUP_EPOCHS, eta_min=1e-6
+    #)
+    scheduler = CosineAnnealingLR(
+        optimizer, T_max=NUM_EPOCHS, eta_min=1e-6
     )
     plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="max", factor=0.5, patience=10
