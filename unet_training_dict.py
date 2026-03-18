@@ -16,6 +16,7 @@ builtins.print = functools.partial(builtins.print, flush=True)
 import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import CosineAnnealingLR
+from torch.utils.checkpoint import checkpoint_sequential
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 from sklearn.model_selection import train_test_split
@@ -61,11 +62,11 @@ SW_OVERLAP     = 0.25
 SW_OVERLAP_VAL = 0.5
 PATIENCE       = 30
 PRED_THRESHOLD = 0.4
-ACCUM_STEPS    = 4
+ACCUM_STEPS    = 2
 TTA_INTERVAL   = 10
 
 TRAIN_SAMPLES_STANDARD = 4
-TRAIN_SAMPLES_ANEURYSM = 8
+TRAIN_SAMPLES_ANEURYSM = 6
 ANEURYSM_REPEAT        = 3
 
 # ── Aneurysm case splits — fixed across Phase 1 and Phase 2 ───────────────────
@@ -367,7 +368,7 @@ def main():
         spatial_dims=3, in_channels=1, out_channels=1,
         channels=CHANNELS, strides=STRIDES,
     ).to(device)
-
+    model.gradient_checkpointing = True
     # ── Load checkpoint if exists ──────────────────────────────────────────────
     PRETRAINED_CKPT = "/kaggle/working/best_model.pth"
     if os.path.exists(PRETRAINED_CKPT):
