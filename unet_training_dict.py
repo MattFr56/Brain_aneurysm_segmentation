@@ -66,7 +66,7 @@ ACCUM_STEPS    = 2
 TTA_INTERVAL   = 10
 
 TRAIN_SAMPLES_STANDARD = 2
-TRAIN_SAMPLES_ANEURYSM = 6
+TRAIN_SAMPLES_ANEURYSM = 4
 ANEURYSM_REPEAT        = 3
 
 # ── Aneurysm case splits — fixed across Phase 1 and Phase 2 ───────────────────
