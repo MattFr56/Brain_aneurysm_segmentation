@@ -270,7 +270,7 @@ def main():
         RandCropByPosNegLabeld(
             keys=["img", "seg"], label_key="seg",
             spatial_size=SPATIAL_SIZE,
-            pos=3, neg=1,
+            pos=0.9, neg=0.1,
             num_samples=TRAIN_SAMPLES_STANDARD,
             allow_smaller=True,
         ),
@@ -295,7 +295,7 @@ def main():
         RandCropByPosNegLabeld(
             keys=["img", "seg"], label_key="seg",
             spatial_size=SPATIAL_SIZE,
-            pos=1, neg=1,
+            pos=0.9, neg=0.1,
             num_samples=TRAIN_SAMPLES_ANEURYSM,
             allow_smaller=True,
         ),
