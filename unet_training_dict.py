@@ -32,6 +32,9 @@ from monai.transforms import (
 )
 from monai.visualize import plot_2d_or_3d_image
 
+import functools
+import builtins
+builtins.print = functools.partial(builtins.print, flush=True)
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
@@ -49,16 +52,17 @@ STRIDES  = (2, 2, 2)
 HU_MIN         = 100
 HU_MAX         = 400
 SPATIAL_SIZE   = (128, 128, 32)
-NUM_EPOCHS     = 500
+NUM_EPOCHS     = 100        # ← was 500
 VAL_INTERVAL   = 2
 TRAIN_SAMPLES  = 4
 BATCH_SIZE     = 1
 SW_OVERLAP     = 0.25
 SW_OVERLAP_VAL = 0.5
-PATIENCE       = 60
+PATIENCE       = 40         # ← was 60
 PRED_THRESHOLD = 0.4
 WARMUP_EPOCHS  = 10
 ACCUM_STEPS    = 4
+TTA_INTERVAL   = 10         # ← new: TTA only every 10 epochs
 
 
 # ── TTA ────────────────────────────────────────────────────────────────────────
@@ -332,21 +336,34 @@ def main():
         print(f"epoch {epoch+1} avg loss: {epoch_loss:.4f}  lr: {current_lr:.2e}")
 
         # ── Validation with TTA ────────────────────────────────────────────────
+        # ── Validation ────────────────────────────────────────────────────────
         val_dice = val_hd95 = None
         if (epoch + 1) % VAL_INTERVAL == 0:
             model.eval()
+            use_tta = ((epoch + 1) % TTA_INTERVAL == 0)
+            print(f"  {'TTA ' if use_tta else 'fast'} validation...", flush=True)
+
             with torch.no_grad():
-                for val_data in val_loader:
-                    val_inputs  = val_data["img"].to(device)
-                    val_labels  = val_data["seg"].to(device)
+                for val_idx, val_data in enumerate(val_loader):
+                    print(f"  val {val_idx+1}/{len(val_loader)}...", flush=True)
+                    val_inputs     = val_data["img"].to(device)
+                    val_labels     = val_data["seg"].to(device)
 
-                    # TTA inference
-                    mean_prob   = tta_inference(model, val_inputs,
-                                               SPATIAL_SIZE, SW_OVERLAP_VAL)
-                    val_outputs = [post_trans(i) for i in
-                                   decollate_batch(mean_prob)]
+                    if use_tta:
+                        mean_prob = tta_inference(
+                            model, val_inputs, SPATIAL_SIZE, SW_OVERLAP_VAL
+                        )
+                    else:
+                        out       = sliding_window_inference(
+                            val_inputs, roi_size=SPATIAL_SIZE,
+                            sw_batch_size=8, predictor=model,
+                            overlap=SW_OVERLAP_VAL,
+                        )
+                        mean_prob = torch.sigmoid(out)
+
+                    val_outputs    = [post_trans(i) for i in
+                                      decollate_batch(mean_prob)]
                     val_labels_dec = [i for i in decollate_batch(val_labels)]
-
                     dice_metric(y_pred=val_outputs, y=val_labels_dec)
                     hd95_metric(y_pred=val_outputs, y=val_labels_dec)
 
@@ -359,7 +376,6 @@ def main():
             writer.add_scalar("val_mean_dice", val_dice, epoch + 1)
             writer.add_scalar("val_hd95",      val_hd95, epoch + 1)
 
-            # Save best Dice
             if val_dice > best_metric:
                 best_metric       = val_dice
                 best_metric_epoch = epoch + 1
@@ -377,12 +393,11 @@ def main():
                     "hu_min":       HU_MIN,
                     "hu_max":       HU_MAX,
                 }, CHECKPOINT)
-                print("  ✓ saved new best Dice model")
+                print("  ✓ saved new best Dice model", flush=True)
             else:
                 no_improve_count += 1
-                print(f"  no improvement {no_improve_count}/{PATIENCE}")
+                print(f"  no improvement {no_improve_count}/{PATIENCE}", flush=True)
 
-            # Save best HD95
             if val_hd95 < best_hd95:
                 best_hd95       = val_hd95
                 best_hd95_epoch = epoch + 1
@@ -399,11 +414,12 @@ def main():
                     "hu_min":       HU_MIN,
                     "hu_max":       HU_MAX,
                 }, CHECKPOINT.replace(".pth", "_hd95.pth"))
-                print(f"  ✓ saved new best HD95 ({best_hd95:.2f}mm)")
+                print(f"  ✓ saved new best HD95 ({best_hd95:.2f}mm)", flush=True)
 
             print(f"  val dice: {val_dice:.4f}  hd95: {val_hd95:.2f}mm  |  "
                   f"best dice: {best_metric:.4f} @ ep {best_metric_epoch}  |  "
-                  f"best hd95: {best_hd95:.2f}mm @ ep {best_hd95_epoch}")
+                  f"best hd95: {best_hd95:.2f}mm @ ep {best_hd95_epoch}",
+                  flush=True)
             plot_2d_or_3d_image(val_inputs,  epoch+1, writer, index=0, tag="image")
             plot_2d_or_3d_image(val_labels,  epoch+1, writer, index=0, tag="label")
             plot_2d_or_3d_image(
