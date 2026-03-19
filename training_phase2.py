@@ -61,7 +61,7 @@ CURVE_PATH  = "/kaggle/working/training_curves_phase2.png"
 # If your Phase 1 checkpoint used (64,128,256,512) you have two options:
 #   A) retrain Phase 1 with (32,64,128,256) — recommended for consistency
 #   B) keep (64,128,256,512) and apply all other OOM fixes — may still OOM
-CHANNELS = (32, 64, 128, 256)
+CHANNELS = (64,128,256,512)
 STRIDES  = (2, 2, 2)
 
 # ── Hyperparameters ────────────────────────────────────────────────────────────
