@@ -63,9 +63,9 @@ BATCH_SIZE      = 1
 SW_OVERLAP_VAL  = 0.5
 PATIENCE        = 15
 PRED_THRESHOLD  = 0.4
-ACCUM_STEPS     = 4
+ACCUM_STEPS     = 2
 ANEURYSM_REPEAT = 5
-REPLAY_PCT      = 0.5   # 50% vessel replay to prevent forgetting
+REPLAY_PCT      = 0.2   # 50% vessel replay to prevent forgetting
 EMA_DECAY       = 0.999
 
 # ── Aneurysm splits — fixed across Phase 1 and Phase 2 ────────────────────────
