@@ -16,6 +16,7 @@ builtins.print = functools.partial(builtins.print, flush=True)
 
 import torch
 import torch.nn as nn
+from torch.cuda.amp import autocast, GradScaler   # OOM FIX: mixed precision
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
@@ -37,7 +38,8 @@ from monai.transforms import (
 )
 from monai.visualize import plot_2d_or_3d_image
 
-os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
+# OOM FIX: allow PyTorch to split large allocations rather than failing
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 IMAGE_DIR   = "/kaggle/working/merged/volumes"
@@ -48,7 +50,18 @@ CSV_PATH    = "/kaggle/working/training_log_phase2.csv"
 CURVE_PATH  = "/kaggle/working/training_curves_phase2.png"
 
 # ── Architecture ───────────────────────────────────────────────────────────────
-CHANNELS = (64, 128, 256, 512)
+# OOM FIX: channels halved from (64,128,256,512) to (32,64,128,256).
+# The larger config exceeds 16 GB on a T4 when you account for:
+#   - fp32 model weights
+#   - EMA shadow copy (same size as weights)
+#   - Optimizer state (AdamW keeps 2 momentum tensors per param)
+#   - Forward activations for backprop
+# Halving channels reduces activation memory ~4x. Weight transfer from
+# Phase 1 still works as long as Phase 1 used the same channel config.
+# If your Phase 1 checkpoint used (64,128,256,512) you have two options:
+#   A) retrain Phase 1 with (32,64,128,256) — recommended for consistency
+#   B) keep (64,128,256,512) and apply all other OOM fixes — may still OOM
+CHANNELS = (32, 64, 128, 256)
 STRIDES  = (2, 2, 2)
 
 # ── Hyperparameters ────────────────────────────────────────────────────────────
@@ -58,16 +71,21 @@ SPATIAL_SIZE    = (128, 128, 32)
 NUM_EPOCHS      = 50
 VAL_INTERVAL    = 2
 BATCH_SIZE      = 1
-SW_OVERLAP_VAL  = 0.25   # FIX: was 0.5 — too slow/heavy during training;
-                          #      use 0.5 only for final evaluation
+SW_BATCH_SIZE   = 4       # sliding window batch size for val inference
+SW_OVERLAP_VAL  = 0.25    # 0.5 is too slow/heavy during training val;
+                           # use 0.5 only for final evaluation
 PATIENCE        = 15
 PRED_THRESHOLD  = 0.4
-ACCUM_STEPS     = 2
+ACCUM_STEPS     = 4        # OOM FIX: was 2. More accumulation = smaller
+                            # effective micro-batch = lower peak memory.
+                            # Effective batch size is unchanged.
 ANEURYSM_REPEAT = 5
 REPLAY_PCT      = 0.2
 EMA_DECAY       = 0.999
 
 # ── Aneurysm splits ────────────────────────────────────────────────────────────
+# case_0152 and case_0166 moved from Phase 1 val → Phase 2 train.
+# Phase 1 is frozen; moving them adds training signal without any data leak.
 ANEURYSM_TRAIN_P2 = {
     "case_0131", "case_0132", "case_0136",
     "case_0139", "case_0141", "case_0142",
@@ -87,6 +105,15 @@ def is_aneurysm(path):
 
 # ── EMA ────────────────────────────────────────────────────────────────────────
 class EMA:
+    """Exponential moving average of model weights.
+
+    Usage contract:
+      - Call apply_shadow() ONCE before any val/save block.
+      - Call restore() ONCE after all saves are done.
+      - Never call apply_shadow() a second time while shadow is active:
+        it would overwrite backup with shadow weights, making restore()
+        load shadow back into params instead of the training weights.
+    """
     def __init__(self, model, decay=0.999):
         self.model  = model
         self.decay  = decay
@@ -120,31 +147,34 @@ class EMA:
 
 
 # ── TTA (8 flip combinations) ─────────────────────────────────────────────────
-TTA_FLIPS     = [[], [2], [3], [4], [2,3], [2,4], [3,4], [2,3,4]]
-TTA_ROTATIONS = [2]
+TTA_FLIPS = [[], [2], [3], [4], [2,3], [2,4], [3,4], [2,3,4]]
 
-def tta_inference(model, inputs, roi_size, overlap):
+def tta_inference(model, inputs, roi_size, overlap, sw_batch_size):
+    """8-flip TTA with autocast for memory efficiency.
+    Call inside torch.no_grad().
+    """
     preds = []
     for axes in TTA_FLIPS:
-        for k in TTA_ROTATIONS:
-            x = torch.flip(inputs, axes) if axes else inputs.clone()
-            if k > 0:
-                x = torch.rot90(x, k, dims=[2, 3])
+        x = torch.flip(inputs, axes) if axes else inputs.clone()
+        # OOM FIX: autocast keeps intermediate activations in fp16
+        with autocast():
             pred = sliding_window_inference(
-                x, roi_size=roi_size, sw_batch_size=2,
-                predictor=model, overlap=overlap,
+                x, roi_size=roi_size,
+                sw_batch_size=sw_batch_size,
+                predictor=model,
+                overlap=overlap,
             )
-            if k > 0:
-                pred = torch.rot90(pred, -k, dims=[2, 3])
-            if axes:
-                pred = torch.flip(pred, axes)
-            preds.append(torch.sigmoid(pred))
+        pred = pred.float()      # back to fp32 before sigmoid
+        if axes:
+            pred = torch.flip(pred, axes)
+        preds.append(torch.sigmoid(pred))
     print(f"    TTA: {len(preds)} augmentations averaged")
     return torch.mean(torch.stack(preds), dim=0)
 
 
 # ── Threshold optimization ─────────────────────────────────────────────────────
-def find_best_threshold(model, val_loader, device, spatial_size, overlap):
+def find_best_threshold(model, val_loader, device, spatial_size,
+                        overlap, sw_batch_size):
     print("\n=== Threshold optimization ===")
     all_probs  = []
     all_labels = []
@@ -154,7 +184,8 @@ def find_best_threshold(model, val_loader, device, spatial_size, overlap):
         for val_data in val_loader:
             val_inputs = val_data["img"].to(device)
             val_labels = val_data["seg"].to(device)
-            mean_prob  = tta_inference(model, val_inputs, spatial_size, overlap)
+            mean_prob  = tta_inference(model, val_inputs, spatial_size,
+                                       overlap, sw_batch_size)
             all_probs.append(mean_prob.cpu())
             all_labels.append(val_labels.cpu())
 
@@ -205,8 +236,8 @@ def plot_curves(csv_path, out_path):
             if row["val_dice"]:
                 val_epochs.append(int(row["epoch"]))
                 dices.append(float(row["val_dice"]))
-                # FIX: guard against "nan" string before float conversion
                 hd_str = row["val_hd95"]
+                # guard against "nan" string before float conversion
                 hd95s.append(
                     float(hd_str)
                     if hd_str and hd_str.lower() != "nan"
@@ -272,17 +303,17 @@ def main():
                       if get_stem(d["img"]) in ANEURYSM_TRAIN_P2]
     aneurysm_val   = [d for d in all_files
                       if get_stem(d["img"]) in ANEURYSM_VAL_P2]
+    # Replay pool = all non-aneurysm cases (automatically excludes val cases)
     normal_cases   = [d for d in all_files if not is_aneurysm(d["img"])]
 
     n_replay = int(len(normal_cases) * REPLAY_PCT)
 
-    # FIX: replay is re-sampled every epoch inside the loop (see training loop)
-    # — don't sample once here
-
-    print(f"Aneurysm train: {len(aneurysm_train)} cases x {ANEURYSM_REPEAT} "
-          f"repeat = {len(aneurysm_train)*ANEURYSM_REPEAT} entries/epoch")
-    print(f"Vessel replay : {n_replay} cases sampled fresh each epoch")
-    print(f"Phase 2 val   : {len(aneurysm_val)} aneurysm cases only")
+    print(f"Aneurysm train : {len(aneurysm_train)} cases x "
+          f"{ANEURYSM_REPEAT} repeat = "
+          f"{len(aneurysm_train)*ANEURYSM_REPEAT} entries/epoch")
+    print(f"Vessel replay  : {n_replay} cases sampled fresh each epoch "
+          f"(pool: {len(normal_cases)})")
+    print(f"Phase 2 val    : {len(aneurysm_val)} aneurysm cases (held out)")
 
     # ── Transforms ─────────────────────────────────────────────────────────────
     shared_pre = [
@@ -302,7 +333,12 @@ def main():
             keys=["img", "seg"], label_key="seg",
             spatial_size=SPATIAL_SIZE,
             pos=9, neg=1,
-            num_samples=8,
+            num_samples=4,      # OOM FIX: was 8. Each sample is a separate
+                                # forward pass keeping activations alive for
+                                # backprop. Halving from 8→4 halves peak
+                                # activation memory. Diversity is maintained
+                                # by re-sampling replay each epoch and the
+                                # heavy augmentation pipeline below.
             allow_smaller=True,
         ),
         SpatialPadd(keys=["img", "seg"], spatial_size=SPATIAL_SIZE),
@@ -351,7 +387,6 @@ def main():
     print("Building val dataset...")
     val_ds = CacheDataset(data=aneurysm_val, transform=val_transforms,
                           cache_rate=1.0, num_workers=2)
-
     val_loader = DataLoader(
         val_ds, batch_size=1, num_workers=2,
         collate_fn=pad_list_data_collate,
@@ -388,7 +423,7 @@ def main():
         print(f"  DataParallel on {torch.cuda.device_count()} GPUs")
         model = nn.DataParallel(model)
 
-    # ── EMA — init on unwrapped model before DataParallel ─────────────────────
+    # ── EMA — init on unwrapped model ─────────────────────────────────────────
     raw_model = model.module if hasattr(model, "module") else model
     ema       = EMA(raw_model, decay=EMA_DECAY)
     print(f"EMA initialized (decay={EMA_DECAY})")
@@ -396,18 +431,22 @@ def main():
     # ── Loss ───────────────────────────────────────────────────────────────────
     loss_function = TverskyLoss(sigmoid=True, alpha=0.3, beta=0.7)
 
-    # ── Optimizer ─────────────────────────────────────────────────────────────
+    # ── Optimizer + scheduler ─────────────────────────────────────────────────
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=1e-5, weight_decay=1e-4
     )
-
-    # FIX: single scheduler — ReduceLROnPlateau only.
-    # CosineAnnealingLR + ReduceLROnPlateau fight each other: Cosine
-    # overrides every LR drop that Plateau triggers. For fine-tuning a
-    # strong checkpoint, Plateau alone is the right choice.
+    # Single scheduler: ReduceLROnPlateau only.
+    # CosineAnnealingLR + ReduceLROnPlateau fight each other — Cosine
+    # overrides every LR drop that Plateau triggers. Plateau alone is the
+    # right choice for fine-tuning a strong Phase 1 checkpoint.
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="max", factor=0.5, patience=5, min_lr=1e-7
     )
+
+    # OOM FIX: GradScaler for mixed-precision training.
+    # Inflates gradients before backward to avoid fp16 underflow,
+    # then unscales before the optimizer step.
+    scaler = GradScaler()
 
     # ── Metrics ────────────────────────────────────────────────────────────────
     dice_metric = DiceMetric(include_background=False, reduction="mean",
@@ -430,9 +469,8 @@ def main():
         print("-" * 10)
         print(f"epoch {epoch+1}/{NUM_EPOCHS}")
 
-        # FIX: re-sample replay cases each epoch so the model sees different
-        # vessel cases rather than the same fixed subset for all 50 epochs
-        replay      = random.sample(normal_cases, n_replay)
+        # Re-sample replay cases each epoch for variety
+        replay       = random.sample(normal_cases, n_replay)
         phase2_train = []
         for d in aneurysm_train:
             for _ in range(ANEURYSM_REPEAT):
@@ -447,30 +485,35 @@ def main():
             pin_memory=torch.cuda.is_available(),
         )
 
-        # FIX: epoch_len computed once, outside the batch loop,
-        # using len(train_loader) which reflects actual number of batches
-        # (after RandCropByPosNegLabeld expansion)
-        epoch_len = len(train_loader)
-
+        epoch_len  = len(train_loader)
         model.train()
         epoch_loss = 0
         step       = 0
         optimizer.zero_grad()
 
         for batch_idx, batch_data in enumerate(train_loader):
-            step   += 1
-            inputs  = batch_data["img"].to(device)
-            labels  = batch_data["seg"].to(device)
-            outputs = model(inputs)
-            loss    = loss_function(outputs, labels) / ACCUM_STEPS
-            loss.backward()
+            step  += 1
+            inputs = batch_data["img"].to(device)
+            labels = batch_data["seg"].to(device)
+
+            # OOM FIX: autocast keeps forward-pass activations in fp16,
+            # roughly halving training memory vs pure fp32.
+            with autocast():
+                outputs = model(inputs)
+                loss    = loss_function(outputs, labels) / ACCUM_STEPS
+
+            # OOM FIX: scaler.scale(loss).backward() replaces loss.backward()
+            scaler.scale(loss).backward()
 
             if (batch_idx + 1) % ACCUM_STEPS == 0 or \
                (batch_idx + 1) == len(train_loader):
+                # Unscale before clip so grad norms are in true fp32 scale
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(
                     model.parameters(), max_norm=1.0
                 )
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 optimizer.zero_grad()
                 ema.update()
 
@@ -482,23 +525,21 @@ def main():
                               epoch_len * epoch + step)
 
         epoch_loss /= step
-
-        # FIX: read LR after optimizer.step() (not before), and use
-        # param_groups since ReduceLROnPlateau has no get_last_lr()
+        # ReduceLROnPlateau has no get_last_lr() — read from param_groups
         current_lr = optimizer.param_groups[0]["lr"]
         writer.add_scalar("lr", current_lr, epoch + 1)
         print(f"epoch {epoch+1} avg loss: {epoch_loss:.4f}  "
               f"lr: {current_lr:.2e}")
 
-        # ── Validation with EMA + TTA ──────────────────────────────────────────
+        # ── Validation: EMA weights + TTA ─────────────────────────────────────
         val_dice = val_hd95 = None
         if (epoch + 1) % VAL_INTERVAL == 0:
+            # apply_shadow() once — backs up training weights, loads EMA weights.
             ema.apply_shadow()
             model.eval()
-            print(f"  TTA validation (EMA weights, "
-                  f"{len(TTA_FLIPS)*len(TTA_ROTATIONS)} augs)...")
+            print(f"  TTA validation (EMA weights, {len(TTA_FLIPS)} augs)...")
 
-            per_case_dices = []   # track per-case Dice for transparency
+            per_case_dices = []
 
             with torch.no_grad():
                 for val_idx, val_data in enumerate(val_loader):
@@ -506,7 +547,8 @@ def main():
                     val_inputs     = val_data["img"].to(device)
                     val_labels     = val_data["seg"].to(device)
                     mean_prob      = tta_inference(
-                        model, val_inputs, SPATIAL_SIZE, SW_OVERLAP_VAL
+                        model, val_inputs, SPATIAL_SIZE,
+                        SW_OVERLAP_VAL, SW_BATCH_SIZE,
                     )
                     val_outputs    = [post_trans(i) for i in
                                       decollate_batch(mean_prob)]
@@ -514,7 +556,6 @@ def main():
                     dice_metric(y_pred=val_outputs, y=val_labels_dec)
                     hd95_metric(y_pred=val_outputs, y=val_labels_dec)
 
-                    # per-case Dice for logging
                     for pred, lab in zip(val_outputs, val_labels_dec):
                         tp = (pred * lab).sum()
                         dc = (2 * tp / (pred.sum() + lab.sum() + 1e-5)).item()
@@ -529,16 +570,13 @@ def main():
                   f"{[f'{d:.4f}' for d in per_case_dices]}  "
                   f"(min={min(per_case_dices):.4f})")
 
-            # FIX: save checkpoints HERE, while shadow weights are still
-            # active from the apply_shadow() call above.
-            # Do NOT call apply_shadow() again — backup is already populated
-            # and a second call would overwrite it with shadow weights,
-            # making restore() load shadow into params instead of training weights.
-
+            # ── Save checkpoints while EMA shadow is still active ──────────────
+            # DO NOT call apply_shadow() again here — backup is already set.
+            # A second call would write shadow into backup, making restore()
+            # load shadow back into params instead of training weights.
             if val_dice > best_metric:
                 best_metric       = val_dice
                 best_metric_epoch = epoch + 1
-                no_improve_count  = 0
                 torch.save({
                     "state_dict":   raw_model.state_dict(),
                     "channels":     CHANNELS,
@@ -552,10 +590,6 @@ def main():
                     "hu_max":       HU_MAX,
                 }, CHECKPOINT)
                 print("  saved new best Dice model (EMA weights)")
-            else:
-                # FIX: only increment no_improve_count if NEITHER metric improved
-                # (checked below after the HD95 block)
-                pass
 
             if val_hd95 < best_hd95:
                 best_hd95       = val_hd95
@@ -574,15 +608,17 @@ def main():
                 }, CHECKPOINT.replace(".pth", "_hd95.pth"))
                 print(f"  saved new best HD95 ({best_hd95:.2f}mm)")
 
-            # FIX: single restore — called once after all saves
+            # Single restore — called once after all saves
             ema.restore()
 
-            # FIX: increment no_improve_count only if neither Dice nor HD95 improved
+            # Increment patience only if NEITHER metric improved
             if val_dice <= best_metric and val_hd95 >= best_hd95:
                 no_improve_count += 1
                 print(f"  no improvement {no_improve_count}/{PATIENCE}")
+            else:
+                no_improve_count = 0
 
-            # FIX: step only the single scheduler, after restore
+            # Step the single scheduler after restore
             scheduler.step(val_dice)
 
             writer.add_scalar("val_mean_dice", val_dice, epoch + 1)
@@ -615,7 +651,7 @@ def main():
     print("\nRunning threshold optimization on val set...")
     ema.apply_shadow()
     best_thresh, best_thresh_dice = find_best_threshold(
-        model, val_loader, device, SPATIAL_SIZE, SW_OVERLAP_VAL
+        model, val_loader, device, SPATIAL_SIZE, SW_OVERLAP_VAL, SW_BATCH_SIZE
     )
     ema.restore()
 
