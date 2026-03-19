@@ -122,7 +122,7 @@ class EMA:
 
 # ── Extended TTA (16 augmentations: 8 flips x 2 rotations) ───────────────────
 TTA_FLIPS     = [[], [2], [3], [4], [2,3], [2,4], [3,4], [2,3,4]]
-TTA_ROTATIONS = [0, 2]  # 0 and 180 degrees in xy plane
+TTA_ROTATIONS = [2]  # 0 and 180 degrees in xy plane
 
 def tta_inference(model, inputs, roi_size, overlap):
     preds = []
