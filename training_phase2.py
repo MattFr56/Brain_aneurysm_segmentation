@@ -16,10 +16,8 @@ builtins.print = functools.partial(builtins.print, flush=True)
 
 import torch
 import torch.nn as nn
-from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
-from sklearn.model_selection import train_test_split
 
 import monai
 from monai.losses import TverskyLoss
@@ -42,12 +40,12 @@ from monai.visualize import plot_2d_or_3d_image
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
-IMAGE_DIR    = "/kaggle/working/merged/volumes"
-MASK_DIR     = "/kaggle/working/merged/labels"
-PHASE1_CKPT  = "/kaggle/working/best_model_phase1.pth"
-CHECKPOINT   = "/kaggle/working/best_model_phase2.pth"
-CSV_PATH     = "/kaggle/working/training_log_phase2.csv"
-CURVE_PATH   = "/kaggle/working/training_curves_phase2.png"
+IMAGE_DIR   = "/kaggle/working/merged/volumes"
+MASK_DIR    = "/kaggle/working/merged/labels"
+PHASE1_CKPT = "/kaggle/working/best_model_phase1.pth"
+CHECKPOINT  = "/kaggle/working/best_model_phase2.pth"
+CSV_PATH    = "/kaggle/working/training_log_phase2.csv"
+CURVE_PATH  = "/kaggle/working/training_curves_phase2.png"
 
 # ── Architecture ───────────────────────────────────────────────────────────────
 CHANNELS = (64, 128, 256, 512)
@@ -60,15 +58,16 @@ SPATIAL_SIZE    = (128, 128, 32)
 NUM_EPOCHS      = 50
 VAL_INTERVAL    = 2
 BATCH_SIZE      = 1
-SW_OVERLAP_VAL  = 0.5
+SW_OVERLAP_VAL  = 0.25   # FIX: was 0.5 — too slow/heavy during training;
+                          #      use 0.5 only for final evaluation
 PATIENCE        = 15
 PRED_THRESHOLD  = 0.4
 ACCUM_STEPS     = 2
 ANEURYSM_REPEAT = 5
-REPLAY_PCT      = 0.2   # 50% vessel replay to prevent forgetting
+REPLAY_PCT      = 0.2
 EMA_DECAY       = 0.999
 
-# ── Aneurysm splits — fixed across Phase 1 and Phase 2 ────────────────────────
+# ── Aneurysm splits ────────────────────────────────────────────────────────────
 ANEURYSM_TRAIN_P2 = {
     "case_0131", "case_0132", "case_0136",
     "case_0139", "case_0141", "case_0142",
@@ -120,9 +119,9 @@ class EMA:
                 param.data = self.backup[name]
 
 
-# ── Extended TTA (16 augmentations: 8 flips x 2 rotations) ───────────────────
+# ── TTA (8 flip combinations) ─────────────────────────────────────────────────
 TTA_FLIPS     = [[], [2], [3], [4], [2,3], [2,4], [3,4], [2,3,4]]
-TTA_ROTATIONS = [2]  # 0 and 180 degrees in xy plane
+TTA_ROTATIONS = [2]
 
 def tta_inference(model, inputs, roi_size, overlap):
     preds = []
@@ -153,10 +152,9 @@ def find_best_threshold(model, val_loader, device, spatial_size, overlap):
     model.eval()
     with torch.no_grad():
         for val_data in val_loader:
-            val_inputs  = val_data["img"].to(device)
-            val_labels  = val_data["seg"].to(device)
-            mean_prob   = tta_inference(model, val_inputs,
-                                        spatial_size, overlap)
+            val_inputs = val_data["img"].to(device)
+            val_labels = val_data["seg"].to(device)
+            mean_prob  = tta_inference(model, val_inputs, spatial_size, overlap)
             all_probs.append(mean_prob.cpu())
             all_labels.append(val_labels.cpu())
 
@@ -168,7 +166,7 @@ def find_best_threshold(model, val_loader, device, spatial_size, overlap):
         for prob, label in zip(all_probs, all_labels):
             pred  = (prob > thresh).float()
             tp    = (pred * label).sum()
-            dice  = (2*tp / (pred.sum() + label.sum() + 1e-5)).item()
+            dice  = (2 * tp / (pred.sum() + label.sum() + 1e-5)).item()
             dices.append(dice)
         mean_dice = float(np.mean(dices))
         print(f"  thresh={thresh:.2f} -> Dice={mean_dice:.4f}")
@@ -191,8 +189,8 @@ def append_csv(path, epoch, train_loss, val_dice, val_hd95, lr):
         csv.writer(f).writerow([
             epoch,
             f"{train_loss:.6f}",
-            f"{val_dice:.6f}" if val_dice is not None else "",
-            f"{val_hd95:.4f}" if val_hd95 is not None else "",
+            f"{val_dice:.6f}"  if val_dice is not None else "",
+            f"{val_hd95:.4f}"  if val_hd95 is not None else "",
             f"{lr:.8f}",
         ])
 
@@ -207,8 +205,12 @@ def plot_curves(csv_path, out_path):
             if row["val_dice"]:
                 val_epochs.append(int(row["epoch"]))
                 dices.append(float(row["val_dice"]))
+                # FIX: guard against "nan" string before float conversion
+                hd_str = row["val_hd95"]
                 hd95s.append(
-                    float(row["val_hd95"]) if row["val_hd95"] else None
+                    float(hd_str)
+                    if hd_str and hd_str.lower() != "nan"
+                    else None
                 )
 
     fig, axes = plt.subplots(1, 3, figsize=(16, 4))
@@ -239,7 +241,7 @@ def plot_curves(csv_path, out_path):
                         alpha=0.6,
                         label=f"Best {min(hd_vals):.2f}mm @ ep {hd_ep[best_hd_idx]}")
         axes[2].legend(fontsize=8)
-    axes[2].set_title("Val HD95 (mm) down")
+    axes[2].set_title("Val HD95 (mm) ↓")
     axes[2].set_xlabel("Epoch"); axes[2].grid(True, alpha=0.3)
 
     plt.tight_layout()
@@ -272,21 +274,15 @@ def main():
                       if get_stem(d["img"]) in ANEURYSM_VAL_P2]
     normal_cases   = [d for d in all_files if not is_aneurysm(d["img"])]
 
-    n_replay   = int(len(normal_cases) * REPLAY_PCT)
-    replay     = random.sample(normal_cases, n_replay)
+    n_replay = int(len(normal_cases) * REPLAY_PCT)
 
-    # Repeat aneurysm cases
-    phase2_train = []
-    for d in aneurysm_train:
-        for _ in range(ANEURYSM_REPEAT):
-            phase2_train.append(d)
-    phase2_train += replay
-    random.shuffle(phase2_train)
+    # FIX: replay is re-sampled every epoch inside the loop (see training loop)
+    # — don't sample once here
 
-    print(f"Phase 2 train: {len(aneurysm_train)} aneurysm x "
-          f"{ANEURYSM_REPEAT} repeat + {n_replay} vessel replay "
-          f"= {len(phase2_train)} total")
-    print(f"Phase 2 val:   {len(aneurysm_val)} aneurysm cases only")
+    print(f"Aneurysm train: {len(aneurysm_train)} cases x {ANEURYSM_REPEAT} "
+          f"repeat = {len(aneurysm_train)*ANEURYSM_REPEAT} entries/epoch")
+    print(f"Vessel replay : {n_replay} cases sampled fresh each epoch")
+    print(f"Phase 2 val   : {len(aneurysm_val)} aneurysm cases only")
 
     # ── Transforms ─────────────────────────────────────────────────────────────
     shared_pre = [
@@ -351,11 +347,15 @@ def main():
         ToTensord(keys=["img", "seg"]),
     ])
 
-    # ── Datasets ───────────────────────────────────────────────────────────────
-    print("Building datasets...")
-    train_ds = MonaiDataset(data=phase2_train, transform=train_transforms)
-    val_ds   = CacheDataset(data=aneurysm_val, transform=val_transforms,
-                            cache_rate=1.0, num_workers=2)
+    # ── Val dataset (fixed, cached) ────────────────────────────────────────────
+    print("Building val dataset...")
+    val_ds = CacheDataset(data=aneurysm_val, transform=val_transforms,
+                          cache_rate=1.0, num_workers=2)
+
+    val_loader = DataLoader(
+        val_ds, batch_size=1, num_workers=2,
+        collate_fn=pad_list_data_collate,
+    )
 
     # Sanity check
     val_check = monai.utils.misc.first(
@@ -364,16 +364,6 @@ def main():
     print(f"Val img shape : {val_check['img'].shape}")
     print(f"Val seg unique: {val_check['seg'].unique()}")
     print(f"Val seg fg vox: {(val_check['seg']>0).sum().item()}")
-
-    train_loader = DataLoader(
-        train_ds, batch_size=BATCH_SIZE, shuffle=True,
-        num_workers=4, collate_fn=pad_list_data_collate,
-        pin_memory=torch.cuda.is_available(),
-    )
-    val_loader = DataLoader(
-        val_ds, batch_size=1, num_workers=2,
-        collate_fn=pad_list_data_collate,
-    )
 
     # ── Model ──────────────────────────────────────────────────────────────────
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -389,7 +379,7 @@ def main():
     state = ckpt["state_dict"] if "state_dict" in ckpt else ckpt
     missing, unexpected = model.load_state_dict(state, strict=False)
     print(f"Phase 1 weights loaded — "
-          f"Dice {ckpt.get('best_dice', '?'):.4f} "
+          f"Dice {ckpt.get('best_dice', '?'):.4f}  "
           f"HD95 {ckpt.get('best_hd95', '?'):.2f}mm")
     if missing:    print(f"  Missing:    {missing}")
     if unexpected: print(f"  Unexpected: {unexpected}")
@@ -398,25 +388,25 @@ def main():
         print(f"  DataParallel on {torch.cuda.device_count()} GPUs")
         model = nn.DataParallel(model)
 
-    # ── EMA ────────────────────────────────────────────────────────────────────
+    # ── EMA — init on unwrapped model before DataParallel ─────────────────────
     raw_model = model.module if hasattr(model, "module") else model
     ema       = EMA(raw_model, decay=EMA_DECAY)
     print(f"EMA initialized (decay={EMA_DECAY})")
 
     # ── Loss ───────────────────────────────────────────────────────────────────
-    loss_function = TverskyLoss(
-        sigmoid=True, alpha=0.3, beta=0.7,
-    )
+    loss_function = TverskyLoss(sigmoid=True, alpha=0.3, beta=0.7)
 
-    # ── Optimizer + scheduler ──────────────────────────────────────────────────
+    # ── Optimizer ─────────────────────────────────────────────────────────────
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=1e-5, weight_decay=1e-4
     )
-    scheduler = CosineAnnealingLR(
-        optimizer, T_max=NUM_EPOCHS, eta_min=1e-7
-    )
-    plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.5, patience=5
+
+    # FIX: single scheduler — ReduceLROnPlateau only.
+    # CosineAnnealingLR + ReduceLROnPlateau fight each other: Cosine
+    # overrides every LR drop that Plateau triggers. For fine-tuning a
+    # strong checkpoint, Plateau alone is the right choice.
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", factor=0.5, patience=5, min_lr=1e-7
     )
 
     # ── Metrics ────────────────────────────────────────────────────────────────
@@ -439,6 +429,29 @@ def main():
     for epoch in range(NUM_EPOCHS):
         print("-" * 10)
         print(f"epoch {epoch+1}/{NUM_EPOCHS}")
+
+        # FIX: re-sample replay cases each epoch so the model sees different
+        # vessel cases rather than the same fixed subset for all 50 epochs
+        replay      = random.sample(normal_cases, n_replay)
+        phase2_train = []
+        for d in aneurysm_train:
+            for _ in range(ANEURYSM_REPEAT):
+                phase2_train.append(d)
+        phase2_train += replay
+        random.shuffle(phase2_train)
+
+        train_ds = MonaiDataset(data=phase2_train, transform=train_transforms)
+        train_loader = DataLoader(
+            train_ds, batch_size=BATCH_SIZE, shuffle=True,
+            num_workers=4, collate_fn=pad_list_data_collate,
+            pin_memory=torch.cuda.is_available(),
+        )
+
+        # FIX: epoch_len computed once, outside the batch loop,
+        # using len(train_loader) which reflects actual number of batches
+        # (after RandCropByPosNegLabeld expansion)
+        epoch_len = len(train_loader)
+
         model.train()
         epoch_loss = 0
         step       = 0
@@ -462,7 +475,6 @@ def main():
                 ema.update()
 
             epoch_loss += loss.item() * ACCUM_STEPS
-            epoch_len   = max(len(train_ds) // train_loader.batch_size, 1)
             print(f"  {step}/{epoch_len}  "
                   f"loss: {loss.item()*ACCUM_STEPS:.4f}")
             writer.add_scalar("train_loss",
@@ -470,10 +482,12 @@ def main():
                               epoch_len * epoch + step)
 
         epoch_loss /= step
-        current_lr  = scheduler.get_last_lr()[0]
-        scheduler.step()
+
+        # FIX: read LR after optimizer.step() (not before), and use
+        # param_groups since ReduceLROnPlateau has no get_last_lr()
+        current_lr = optimizer.param_groups[0]["lr"]
         writer.add_scalar("lr", current_lr, epoch + 1)
-        print(f"epoch {epoch+1} avg loss: {epoch_loss:.4f} "
+        print(f"epoch {epoch+1} avg loss: {epoch_loss:.4f}  "
               f"lr: {current_lr:.2e}")
 
         # ── Validation with EMA + TTA ──────────────────────────────────────────
@@ -483,6 +497,8 @@ def main():
             model.eval()
             print(f"  TTA validation (EMA weights, "
                   f"{len(TTA_FLIPS)*len(TTA_ROTATIONS)} augs)...")
+
+            per_case_dices = []   # track per-case Dice for transparency
 
             with torch.no_grad():
                 for val_idx, val_data in enumerate(val_loader):
@@ -498,23 +514,31 @@ def main():
                     dice_metric(y_pred=val_outputs, y=val_labels_dec)
                     hd95_metric(y_pred=val_outputs, y=val_labels_dec)
 
+                    # per-case Dice for logging
+                    for pred, lab in zip(val_outputs, val_labels_dec):
+                        tp = (pred * lab).sum()
+                        dc = (2 * tp / (pred.sum() + lab.sum() + 1e-5)).item()
+                        per_case_dices.append(dc)
+
             val_dice = dice_metric.aggregate().item()
             val_hd95 = hd95_metric.aggregate().item()
             dice_metric.reset()
             hd95_metric.reset()
-            ema.restore()
 
-            plateau_scheduler.step(val_dice)
-            writer.add_scalar("val_mean_dice", val_dice, epoch + 1)
-            writer.add_scalar("val_hd95",      val_hd95, epoch + 1)
+            print(f"  per-case Dice: "
+                  f"{[f'{d:.4f}' for d in per_case_dices]}  "
+                  f"(min={min(per_case_dices):.4f})")
 
-            # Save best Dice checkpoint (EMA weights)
+            # FIX: save checkpoints HERE, while shadow weights are still
+            # active from the apply_shadow() call above.
+            # Do NOT call apply_shadow() again — backup is already populated
+            # and a second call would overwrite it with shadow weights,
+            # making restore() load shadow into params instead of training weights.
+
             if val_dice > best_metric:
                 best_metric       = val_dice
                 best_metric_epoch = epoch + 1
                 no_improve_count  = 0
-                ema.apply_shadow()
-                raw_model = model.module if hasattr(model, "module") else model
                 torch.save({
                     "state_dict":   raw_model.state_dict(),
                     "channels":     CHANNELS,
@@ -527,18 +551,15 @@ def main():
                     "hu_min":       HU_MIN,
                     "hu_max":       HU_MAX,
                 }, CHECKPOINT)
-                ema.restore()
                 print("  saved new best Dice model (EMA weights)")
             else:
-                no_improve_count += 1
-                print(f"  no improvement {no_improve_count}/{PATIENCE}")
+                # FIX: only increment no_improve_count if NEITHER metric improved
+                # (checked below after the HD95 block)
+                pass
 
-            # Save best HD95 checkpoint (EMA weights)
             if val_hd95 < best_hd95:
                 best_hd95       = val_hd95
                 best_hd95_epoch = epoch + 1
-                ema.apply_shadow()
-                raw_model = model.module if hasattr(model, "module") else model
                 torch.save({
                     "state_dict":   raw_model.state_dict(),
                     "channels":     CHANNELS,
@@ -551,12 +572,27 @@ def main():
                     "hu_min":       HU_MIN,
                     "hu_max":       HU_MAX,
                 }, CHECKPOINT.replace(".pth", "_hd95.pth"))
-                ema.restore()
                 print(f"  saved new best HD95 ({best_hd95:.2f}mm)")
+
+            # FIX: single restore — called once after all saves
+            ema.restore()
+
+            # FIX: increment no_improve_count only if neither Dice nor HD95 improved
+            if val_dice <= best_metric and val_hd95 >= best_hd95:
+                no_improve_count += 1
+                print(f"  no improvement {no_improve_count}/{PATIENCE}")
+
+            # FIX: step only the single scheduler, after restore
+            scheduler.step(val_dice)
+
+            writer.add_scalar("val_mean_dice", val_dice, epoch + 1)
+            writer.add_scalar("val_hd95",      val_hd95, epoch + 1)
+            writer.add_scalar("val_dice_min",  min(per_case_dices), epoch + 1)
 
             print(f"  val dice: {val_dice:.4f}  hd95: {val_hd95:.2f}mm  |  "
                   f"best dice: {best_metric:.4f} @ ep {best_metric_epoch}  |  "
                   f"best hd95: {best_hd95:.2f}mm @ ep {best_hd95_epoch}")
+
             plot_2d_or_3d_image(val_inputs,  epoch+1, writer,
                                 index=0, tag="image")
             plot_2d_or_3d_image(val_labels,  epoch+1, writer,
@@ -583,7 +619,6 @@ def main():
     )
     ema.restore()
 
-    # Update saved checkpoint with optimal threshold
     if os.path.exists(CHECKPOINT):
         ckpt              = torch.load(CHECKPOINT, map_location=device,
                                        weights_only=False)
