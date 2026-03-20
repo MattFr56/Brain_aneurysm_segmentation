@@ -17,7 +17,7 @@ from monai.transforms import (
 # ── Config ─────────────────────────────────────────────────────────────────────
 IMAGE_DIR    = "/content/data"
 OUTPUT_DIR   = "/content/output"
-CHECKPOINT_1 = "/content/best_model_phase1b.pth"
+CHECKPOINT_1 = "/content/best_model_phase1b2.pth"
 CHECKPOINT_2 = None  # optional second model for ensemble
 SW_BATCH     = 8
 SW_OVERLAP   = 0.5   # matches val overlap for consistent results
