@@ -522,16 +522,20 @@ def main():
 
     # ── Loss + mixed precision ─────────────────────────────────────────────────
     loss_function = TverskyLoss(sigmoid=True, alpha=0.3, beta=0.7)
-    scaler        = GradScaler()
+    scaler        = torch.amp.GradScaler('cuda')
 
     # ── Optimizer + schedulers ─────────────────────────────────────────────────
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=2e-5, weight_decay=1e-4
+    model.parameters(), lr=2e-5, weight_decay=1e-4
     )
+    # Step scheduler once normally first, then set last_epoch
     cosine_scheduler = CosineAnnealingWarmRestarts(
-    optimizer, T_0=30, T_mult=2, eta_min=1e-6,
-    last_epoch=RESUME_EPOCH - 1  # ← tells scheduler where we are
+        optimizer, T_0=30, T_mult=2, eta_min=1e-6
     )
+    # Fast-forward scheduler to resume epoch
+    for _ in range(RESUME_EPOCH):
+        cosine_scheduler.step()
+        
     swa_scheduler = SWALR(optimizer, swa_lr=1e-5)
     plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="max", factor=0.5, patience=8
@@ -596,7 +600,7 @@ def main():
             inputs  = batch_data["img"].to(device)
             labels  = batch_data["seg"].to(device)
 
-            with autocast():
+            with torch.amp.autocast('cuda'):
                 outputs = model(inputs)
                 loss    = loss_function(outputs, labels) / ACCUM_STEPS
 
