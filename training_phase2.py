@@ -46,11 +46,11 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 # ── Paths ──────────────────────────────────────────────────────────────────────
 IMAGE_DIR       = "/kaggle/working/merged/volumes"
 MASK_DIR        = "/kaggle/working/merged/labels"
-PRETRAINED_CKPT = "/kaggle/working/best_model_phase1.pth"
-CHECKPOINT      = "/kaggle/working/best_model_phase1b.pth"
-SWA_CHECKPOINT  = "/kaggle/working/best_model_phase1b_swa.pth"
-CSV_PATH        = "/kaggle/working/training_log_phase1b.csv"
-CURVE_PATH      = "/kaggle/working/training_curves_phase1b.png"
+PRETRAINED_CKPT = "/kaggle/working/best_model_phase1b.pth"
+CHECKPOINT      = "/kaggle/working/best_model_phase1b2.pth"
+SWA_CHECKPOINT  = "/kaggle/working/best_model_phase1b2_swa.pth"
+CSV_PATH        = "/kaggle/working/training_log_phase1b2.csv"
+CURVE_PATH      = "/kaggle/working/training_curves_phase1b2.png"
 
 # ── Architecture ───────────────────────────────────────────────────────────────
 CHANNELS = (64, 128, 256, 512)
@@ -60,18 +60,19 @@ STRIDES  = (2, 2, 2)
 HU_MIN         = 100
 HU_MAX         = 400
 SPATIAL_SIZE   = (128, 128, 32)
-NUM_EPOCHS     = 100
+NUM_EPOCHS     = 150
 VAL_INTERVAL   = 2
-BATCH_SIZE     = 2
+BATCH_SIZE     = 1
 SW_OVERLAP_VAL = 0.5
 PATIENCE       = 30
 PRED_THRESHOLD = 0.4
 ACCUM_STEPS    = 2
 EMA_DECAY      = 0.999
-SWA_START      = 70
+SWA_START      = 120
+RESUME_EPOCH   = 50
 
 TRAIN_SAMPLES_STANDARD = 4
-TRAIN_SAMPLES_ANEURYSM = 12
+TRAIN_SAMPLES_ANEURYSM = 6
 ANEURYSM_REPEAT        = 5
 TTA_INTERVAL           = 10
 
@@ -528,7 +529,8 @@ def main():
         model.parameters(), lr=2e-5, weight_decay=1e-4
     )
     cosine_scheduler = CosineAnnealingWarmRestarts(
-        optimizer, T_0=30, T_mult=2, eta_min=1e-6
+    optimizer, T_0=30, T_mult=2, eta_min=1e-6,
+    last_epoch=RESUME_EPOCH - 1  # ← tells scheduler where we are
     )
     swa_scheduler = SWALR(optimizer, swa_lr=1e-5)
     plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
@@ -551,14 +553,17 @@ def main():
     swa_active        = False
 
     # ── Training loop ──────────────────────────────────────────────────────────
-    for epoch in range(NUM_EPOCHS):
+    for epoch in range(RESUME_EPOCH, NUM_EPOCHS):
         print("-" * 10)
         print(f"epoch {epoch+1}/{NUM_EPOCHS}")
 
-        # Rebuild train dataset per epoch (curriculum)
-        curr_files, curr_label = get_curriculum_files(
-            epoch, all_files_phase1
-        )
+        curr_files, curr_label = get_curriculum_files(epoch, all_files_phase1)
+
+        # Clear cache when aneurysm data first appears
+        if epoch == CURRICULUM_ADD_RSNA:
+            torch.cuda.empty_cache()
+            print("Cache cleared for aneurysm curriculum")
+            
         train_pool = [d for d in curr_files
                       if d["img"] not in {v["img"] for v in val_files}]
         random.shuffle(train_pool)
