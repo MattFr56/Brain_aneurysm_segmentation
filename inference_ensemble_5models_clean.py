@@ -168,7 +168,7 @@ def main():
             print(f"\n[{i+1}/{len(dataloader)}] {fname}")
 
             img       = batch["img"].to(device)
-            mean_prob = torch.zeros(1, 1, *img.shape[2:], device=device)
+            mean_prob = torch.zeros(1, 1, *img.shape[2:]).to(device)
 
             # Weighted ensemble — all 5 models
             for j, (model, w) in enumerate(zip(models, weights)):
