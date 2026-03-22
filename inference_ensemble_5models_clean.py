@@ -15,7 +15,7 @@ from monai.transforms import (
 )
 # ── Config ─────────────────────────────────────────────────────────────────────
 IMAGE_DIR    = "/kaggle/input/datasets/mattfr56/ensemble-pth/inference_volume"
-OUTPUT_DIR   = "/content/output"
+OUTPUT_DIR   = "/kaggle/working/output"
 
 CHECKPOINT_0 = "/kaggle/input/datasets/mattfr56/ensemble-pth/best_metric_model_3.pth"
 CHECKPOINT_1 = "/kaggle/input/datasets/mattfr56/ensemble-pth/best_model.pth"
