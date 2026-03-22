@@ -13,16 +13,15 @@ from monai.transforms import (
     LoadImaged, Orientationd, SaveImaged,
     ScaleIntensityRanged, Spacingd,
 )
-
 # ── Config ─────────────────────────────────────────────────────────────────────
-IMAGE_DIR    = "/content/data"
+IMAGE_DIR    = "/kaggle/input/datasets/mattfr56/ensemble-pth/inference_volume"
 OUTPUT_DIR   = "/content/output"
 
-CHECKPOINT_0 = "/content/best_metric_model_3.pth"
-CHECKPOINT_1 = "/content/best_model.pth"
-CHECKPOINT_2 = "/content/best_model_phase1.pth"
-CHECKPOINT_3 = "/content/best_model_phase1b.pth"
-CHECKPOINT_4 = "/content/best_model_phase1b2.pth"
+CHECKPOINT_0 = "/kaggle/input/datasets/mattfr56/ensemble-pth/best_metric_model_3.pth"
+CHECKPOINT_1 = "/kaggle/input/datasets/mattfr56/ensemble-pth/best_model.pth"
+CHECKPOINT_2 = "/kaggle/input/datasets/mattfr56/ensemble-pth/best_model_phase1.pth"
+CHECKPOINT_3 = "/kaggle/input/datasets/mattfr56/ensemble-pth/best_model_phase1b.pth"
+CHECKPOINT_4 = "/kaggle/input/datasets/mattfr56/ensemble-pth/best_model_phase1b2.pth"
 
 # ── Weights — equal to start, tune based on individual val Dice ────────────────
 # To weight by performance, set to val Dice scores:
