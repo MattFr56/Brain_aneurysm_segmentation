@@ -3,7 +3,9 @@ import os
 import sys
 from glob import glob
 
+import numpy as np
 import torch
+from scipy import ndimage
 from monai.config import print_config
 from monai.data import Dataset, DataLoader, decollate_batch
 from monai.inferers import sliding_window_inference
@@ -17,16 +19,37 @@ from monai.transforms import (
 # ── Config ─────────────────────────────────────────────────────────────────────
 IMAGE_DIR    = "/content/data"
 OUTPUT_DIR   = "/content/output"
-CHECKPOINT_1 = "/content/best_model_phase1b2.pth"
-CHECKPOINT_2 = None  # optional second model for ensemble
-SW_BATCH     = 8
-SW_OVERLAP   = 0.5   # matches val overlap for consistent results
 
-TTA_FLIPS = [[], [2], [3], [4], [2,3], [2,4], [3,4], [2,3,4]]
+CHECKPOINT_0 = "/content/best_metric_model_3.pth"
+CHECKPOINT_1 = "/content/best_model.pth"
+CHECKPOINT_2 = "/content/best_model_phase1.pth"
+CHECKPOINT_3 = "/content/best_model_phase1b.pth"
+CHECKPOINT_4 = "/content/best_model_phase1b2.pth"
+
+# ── Weights — equal to start, tune based on individual val Dice ────────────────
+# e.g. set to val Dice scores: WEIGHT_0=0.82, WEIGHT_1=0.79 etc.
+WEIGHT_0 = 1.0
+WEIGHT_1 = 1.0
+WEIGHT_2 = 1.0
+WEIGHT_3 = 1.0
+WEIGHT_4 = 1.0
+
+SW_BATCH           = 2      # safe for T4 VRAM with 5 models
+SW_OVERLAP         = 0.5
+MIN_COMPONENT_SIZE = 50
+N_KEEP_COMPONENTS  = 5
+
+# ── TTA — 16 augmentations (8 flips x 2 rotations) ───────────────────────────
+TTA_FLIPS     = [[], [2], [3], [4], [2,3], [2,4], [3,4], [2,3,4]]
+TTA_ROTATIONS = [0, 2]  # 0° and 180°
 
 
 def load_model(checkpoint_path, device):
-    ckpt      = torch.load(checkpoint_path, map_location=device, weights_only=False)
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
+    ckpt      = torch.load(checkpoint_path, map_location=device,
+                           weights_only=False)
     channels  = ckpt.get("channels",     (64, 128, 256, 512))
     strides   = ckpt.get("strides",      (2, 2, 2))
     threshold = ckpt.get("threshold",    0.4)
@@ -52,18 +75,58 @@ def load_model(checkpoint_path, device):
 
 
 def tta_predict(model, inputs, roi_size, sw_batch_size, overlap):
+    """16 augmentations — 8 flips x 2 rotations."""
     preds = []
-    for dims in TTA_FLIPS:
-        x = torch.flip(inputs, dims) if dims else inputs
-        with torch.no_grad():
-            pred = sliding_window_inference(
-                x, roi_size=roi_size, sw_batch_size=sw_batch_size,
-                predictor=model, overlap=overlap,
-            )
-        if dims:
-            pred = torch.flip(pred, dims)
-        preds.append(torch.sigmoid(pred))
+    for axes in TTA_FLIPS:
+        for k in TTA_ROTATIONS:
+            x = torch.flip(inputs, axes) if axes else inputs.clone()
+            if k > 0:
+                x = torch.rot90(x, k, dims=[2, 3])
+            with torch.no_grad():
+                pred = sliding_window_inference(
+                    x, roi_size=roi_size,
+                    sw_batch_size=sw_batch_size,
+                    predictor=model, overlap=overlap,
+                )
+            if k > 0:
+                pred = torch.rot90(pred, -k, dims=[2, 3])
+            if axes:
+                pred = torch.flip(pred, axes)
+            preds.append(torch.sigmoid(pred))
     return torch.stack(preds).mean(dim=0)
+
+
+def remove_small_components(mask_tensor, min_size=50):
+    """Remove connected components smaller than min_size voxels."""
+    mask_np    = mask_tensor.squeeze().cpu().numpy().astype(bool)
+    labeled, n = ndimage.label(mask_np)
+    if n == 0:
+        return mask_tensor
+    sizes   = ndimage.sum(mask_np, labeled, range(1, n + 1))
+    removed = sum(1 for s in sizes if s < min_size)
+    clean   = np.zeros_like(mask_np)
+    for i, size in enumerate(sizes):
+        if size >= min_size:
+            clean[labeled == i + 1] = 1
+    print(f"  Components: {n} total | "
+          f"{removed} removed (<{min_size} vox) | "
+          f"{n-removed} kept")
+    return torch.from_numpy(clean).unsqueeze(0).float()
+
+
+def keep_largest_components(mask_tensor, n_keep=5):
+    """Keep only the N largest connected components."""
+    mask_np    = mask_tensor.squeeze().cpu().numpy().astype(bool)
+    labeled, n = ndimage.label(mask_np)
+    if n <= n_keep:
+        return mask_tensor
+    sizes = ndimage.sum(mask_np, labeled, range(1, n + 1))
+    top_n = np.argsort(sizes)[-n_keep:]
+    clean = np.zeros_like(mask_np)
+    for idx in top_n:
+        clean[labeled == idx + 1] = 1
+    print(f"  Kept {n_keep} largest components out of {n}")
+    return torch.from_numpy(clean).unsqueeze(0).float()
 
 
 def main():
@@ -73,23 +136,36 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # ── Load models ────────────────────────────────────────────────────────────
-    model1, threshold, spatial_size, hu_min, hu_max = load_model(
-        CHECKPOINT_1, device
-    )
-    model2 = None
-    if CHECKPOINT_2 is not None:
-        model2, _, _, _, _ = load_model(CHECKPOINT_2, device)
-        print("✓ Ensemble mode: averaging 2 models")
-    else:
-        print("✓ Single model mode")
+    # ── Load all 5 models ──────────────────────────────────────────────────────
+    print("\n=== Loading ensemble models ===")
+    model0, threshold, spatial_size, hu_min, hu_max = load_model(
+        CHECKPOINT_0, device)
+    model1, _, _, _, _ = load_model(CHECKPOINT_1, device)
+    model2, _, _, _, _ = load_model(CHECKPOINT_2, device)
+    model3, _, _, _, _ = load_model(CHECKPOINT_3, device)
+    model4, _, _, _, _ = load_model(CHECKPOINT_4, device)
+
+    # Normalize weights to sum to 1
+    raw_weights = [WEIGHT_0, WEIGHT_1, WEIGHT_2, WEIGHT_3, WEIGHT_4]
+    total       = sum(raw_weights)
+    weights     = [w / total for w in raw_weights]
+    models      = [model0, model1, model2, model3, model4]
+    checkpoints = [CHECKPOINT_0, CHECKPOINT_1, CHECKPOINT_2,
+                   CHECKPOINT_3, CHECKPOINT_4]
+
+    print(f"\n✓ Ensemble: {len(models)} models")
+    for ckpt, w in zip(checkpoints, weights):
+        print(f"  {os.path.basename(ckpt):40s} weight={w:.3f}")
+    print(f"  Threshold: {threshold:.2f} | "
+          f"HU: [{hu_min},{hu_max}] | "
+          f"Spatial: {spatial_size}")
 
     # ── Data ───────────────────────────────────────────────────────────────────
     images = sorted(glob(os.path.join(IMAGE_DIR, "*.nii*")))
     files  = [{"img": img} for img in images]
-    print(f"Found {len(files)} volumes for inference")
+    print(f"\nFound {len(files)} volumes for inference")
 
-    # ── Transforms — must match training exactly ───────────────────────────────
+    # ── Transforms ─────────────────────────────────────────────────────────────
     pre_transforms = Compose([
         LoadImaged(keys="img"),
         EnsureChannelFirstd(keys="img"),
@@ -124,21 +200,39 @@ def main():
     # ── Inference ──────────────────────────────────────────────────────────────
     with torch.no_grad():
         for i, batch in enumerate(dataloader):
-            img   = batch["img"].to(device)
-            prob1 = tta_predict(model1, img, spatial_size, SW_BATCH, SW_OVERLAP)
+            fname = os.path.basename(images[i])
+            print(f"\n[{i+1}/{len(dataloader)}] {fname}")
 
-            if model2 is not None:
-                prob2     = tta_predict(model2, img, spatial_size, SW_BATCH, SW_OVERLAP)
-                mean_prob = (prob1 + prob2) / 2.0
-            else:
-                mean_prob = prob1
+            img       = batch["img"].to(device)
+            mean_prob = torch.zeros(1, 1, *img.shape[2:], device=device)
 
-            batch["pred"] = (mean_prob > threshold).float()
-            batch = [post_transforms(item) for item in decollate_batch(batch)]
-            print(f"  [{i+1}/{len(dataloader)}] "
-                  f"{os.path.basename(images[i])} → saved")
+            # Weighted ensemble — loop over all models
+            for j, (model, w) in enumerate(zip(models, weights)):
+                print(f"  Model {j+1}/{len(models)} "
+                      f"(weight={w:.3f})...")
+                prob       = tta_predict(model, img, spatial_size,
+                                         SW_BATCH, SW_OVERLAP)
+                mean_prob += w * prob.to(device)
 
-    print(f"\n✓ Done — predictions saved to {OUTPUT_DIR}")
+            # Threshold to binary
+            binary = (mean_prob > threshold).float()
+
+            # Post-processing
+            binary = remove_small_components(
+                binary, min_size=MIN_COMPONENT_SIZE
+            )
+            binary = keep_largest_components(
+                binary, n_keep=N_KEEP_COMPONENTS
+            )
+
+            batch["pred"] = binary.cpu()
+            batch = [post_transforms(item)
+                     for item in decollate_batch(batch)]
+            print(f"  -> saved to {OUTPUT_DIR}")
+
+    print(f"\n✓ Done — {len(files)} volumes processed")
+    print(f"  Ensemble: {len(models)} models | weights={[f'{w:.3f}' for w in weights]}")
+    print(f"  Output  -> {OUTPUT_DIR}")
 
 
 if __name__ == "__main__":
