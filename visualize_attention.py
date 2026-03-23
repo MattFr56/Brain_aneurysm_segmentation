@@ -26,7 +26,11 @@ SPATIAL_SIZE = (128, 128, 32)
 # ── Slices to visualize ────────────────────────────────────────────────────────
 # Set to your specific z-slice indices (original volume coordinates)
 # Set to None for automatic selection (slices with most foreground)
-SPECIFIC_SLICES = [416, 459, 463, 465, 508]  # ← your slices here
+ORIGINAL_SLICES = [416, 459, 463, 465, 508]
+ORIGINAL_SPACING = 0.5
+TARGET_SPACING = 1.0
+SPECIFIC_SLICES = [int(s * ORIGINAL_SPACING/TARGET_SPACING) for s in ORIGINAL_SLICES]
+print(f"Converted slices: {SPECIFIC_SLICES}")# ← your slices here
 N_SLICES        = 8   # only used if SPECIFIC_SLICES = None
 
 # ── Target layers for GradCAM ──────────────────────────────────────────────────
