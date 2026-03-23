@@ -2,7 +2,9 @@ import os
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 from scipy.ndimage import zoom
+from skimage import measure
 
 from monai.networks.nets import AttentionUnet
 from monai.visualize import GradCAM
@@ -24,14 +26,19 @@ SW_OVERLAP   = 0.5
 SPATIAL_SIZE = (128, 128, 32)
 
 # ── Slices to visualize ────────────────────────────────────────────────────────
-# Set to your specific z-slice indices (original volume coordinates)
+# Set to your specific z-slice indices (in resampled 1mm space)
 # Set to None for automatic selection (slices with most foreground)
 ORIGINAL_SLICES = [416, 459, 463, 465, 508]
 ORIGINAL_SPACING = 0.5
 TARGET_SPACING = 1.0
 SPECIFIC_SLICES = [int(s * ORIGINAL_SPACING/TARGET_SPACING) for s in ORIGINAL_SLICES]
 print(f"Converted slices: {SPECIFIC_SLICES}")# ← your slices here
-N_SLICES        = 8   # only used if SPECIFIC_SLICES = None
+N_SLICES        = 8     # only used if SPECIFIC_SLICES = None
+
+# ── GradCAM style ──────────────────────────────────────────────────────────────
+HEATMAP_ALPHA   = 0.55   # transparency of heatmap over image
+CONTOUR_COLOR   = "white"
+CONTOUR_WIDTH   = 1.5
 
 # ── Target layers for GradCAM ──────────────────────────────────────────────────
 TARGET_LAYERS = [
@@ -44,7 +51,6 @@ TARGET_LAYERS = [
 def load_model(checkpoint_path, device):
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
-
     ckpt      = torch.load(checkpoint_path, map_location=device,
                            weights_only=False)
     channels  = ckpt.get("channels",     (64, 128, 256, 512))
@@ -53,7 +59,6 @@ def load_model(checkpoint_path, device):
     hu_min    = ckpt.get("hu_min",       100)
     hu_max    = ckpt.get("hu_max",       400)
     spatial   = ckpt.get("spatial_size", (128, 128, 32))
-
     model = AttentionUnet(
         spatial_dims=3, in_channels=1, out_channels=1,
         channels=channels, strides=strides,
@@ -68,18 +73,12 @@ def load_model(checkpoint_path, device):
 
 
 def run_gradcam_sliding_window(model, img, spatial_size,
-                                target_layer, device,
-                                overlap=0.25):
-    """
-    Run GradCAM over sliding window patches and stitch into full volume.
-    Returns GradCAM map same shape as img (H, W, D).
-    """
+                                target_layer, device, overlap=0.25):
     _, _, H, W, D = img.shape
     gradcam_vol   = np.zeros((H, W, D), dtype=np.float32)
     count_vol     = np.zeros((H, W, D), dtype=np.float32)
-
-    stride = [max(1, int(s * (1 - overlap))) for s in spatial_size]
-    cam    = GradCAM(nn_module=model, target_layers=target_layer)
+    stride        = [max(1, int(s * (1 - overlap))) for s in spatial_size]
+    cam           = GradCAM(nn_module=model, target_layers=target_layer)
 
     positions = [
         (h, w, d)
@@ -92,25 +91,19 @@ def run_gradcam_sliding_window(model, img, spatial_size,
     for count, (h, w, d) in enumerate(positions, 1):
         if count % 10 == 0:
             print(f"    patch {count}/{total}...", end="\r")
-
         h2 = min(h + spatial_size[0], H)
         w2 = min(w + spatial_size[1], W)
         d2 = min(d + spatial_size[2], D)
-
         patch = img[:, :, h:h2, w:w2, d:d2].clone()
-
-        # Pad if needed
         ph = spatial_size[0] - patch.shape[2]
         pw = spatial_size[1] - patch.shape[3]
         pd = spatial_size[2] - patch.shape[4]
         if ph > 0 or pw > 0 or pd > 0:
             patch = torch.nn.functional.pad(patch, (0, pd, 0, pw, 0, ph))
-
         try:
-            patch_req = patch.requires_grad_(True)
-            result    = cam(x=patch_req)
-            gc        = result[0, 0].detach().cpu().numpy()
-            gc        = gc[:h2-h, :w2-w, :d2-d]
+            result = cam(x=patch.requires_grad_(True))
+            gc     = result[0, 0].detach().cpu().numpy()
+            gc     = gc[:h2-h, :w2-w, :d2-d]
             gradcam_vol[h:h2, w:w2, d:d2] += gc
             count_vol[h:h2, w:w2, d:d2]   += 1
         except Exception:
@@ -122,50 +115,57 @@ def run_gradcam_sliding_window(model, img, spatial_size,
     return gradcam_vol
 
 
-def get_slices(pred_np, specific_slices, n_slices, vol_depth):
-    """Return slice indices to visualize."""
-    if specific_slices is not None:
-        slices = [max(0, min(s, vol_depth - 1)) for s in specific_slices]
-        print(f"Using specific slices: {slices}")
-    else:
-        fg_per_slice = (pred_np > 0).sum(axis=(0, 1))
-        if fg_per_slice.max() > 0:
-            slices = sorted(
-                np.argsort(fg_per_slice)[-n_slices:].tolist()
-            )
-        else:
-            slices = np.linspace(0, vol_depth-1, n_slices, dtype=int).tolist()
-        print(f"Auto-selected slices: {slices}")
-    return slices
-
-
 def normalize_map(arr):
-    """Normalize array to [0, 1]."""
     mn, mx = arr.min(), arr.max()
-    if mx > mn:
-        return (arr - mn) / (mx - mn)
-    return arr
+    return (arr - mn) / (mx - mn) if mx > mn else arr
 
 
 def resize_to_match(arr, target_shape):
-    """Resize arr to target_shape using zoom."""
     if arr.shape == target_shape:
         return arr
     scale = [target_shape[i] / arr.shape[i] for i in range(3)]
     return zoom(arr, scale, order=1)
 
 
+def blend_heatmap(img_slice, gc_slice, alpha=0.55):
+    """
+    Blend GradCAM heatmap over grayscale image — same style as cat image.
+    img_slice: (H, W) float [0,1]
+    gc_slice:  (H, W) float [0,1]
+    Returns:   (H, W, 3) RGB
+    """
+    # Convert grayscale to RGB
+    img_rgb = np.stack([img_slice, img_slice, img_slice], axis=-1)
+
+    # Apply jet colormap to GradCAM
+    heatmap_rgb = cm.jet(gc_slice)[:, :, :3]  # (H, W, 3)
+
+    # Blend
+    blended = (1 - alpha) * img_rgb + alpha * heatmap_rgb
+    return np.clip(blended, 0, 1)
+
+
+def get_slices(pred_np, specific_slices, n_slices, vol_depth):
+    if specific_slices is not None:
+        slices = [max(0, min(s, vol_depth - 1)) for s in specific_slices]
+        print(f"Using specific slices: {slices}")
+    else:
+        fg_per_slice = (pred_np > 0).sum(axis=(0, 1))
+        if fg_per_slice.max() > 0:
+            slices = sorted(np.argsort(fg_per_slice)[-n_slices:].tolist())
+        else:
+            slices = np.linspace(
+                0, vol_depth-1, n_slices, dtype=int
+            ).tolist()
+        print(f"Auto-selected slices: {slices}")
+    return slices
+
+
 def visualize_gradcam(img_np, pred_np, gradcam_maps,
                        output_dir, specific_slices=None, n_slices=8):
-    """
-    Plot GradCAM overlays for each target layer.
-    img_np, pred_np: (H, W, D)
-    gradcam_maps: dict {layer_name: (H, W, D)}
-    """
-    slices   = get_slices(pred_np, specific_slices,
-                           n_slices, img_np.shape[2])
-    n_layers = len(gradcam_maps)
-    cols     = 2 + n_layers
+
+    slices = get_slices(pred_np, specific_slices,
+                         n_slices, img_np.shape[2])
 
     # Preprocess GradCAM maps
     gc_processed = {}
@@ -174,73 +174,119 @@ def visualize_gradcam(img_np, pred_np, gradcam_maps,
         gc_map = normalize_map(gc_map)
         gc_processed[layer_name] = gc_map
 
+    n_layers = len(gc_processed)
+
     # ── Per-slice plots ────────────────────────────────────────────────────────
     for slice_idx in slices:
-        fig, axes = plt.subplots(1, cols, figsize=(cols * 4, 4))
-        fig.suptitle(f"GradCAM — Slice z={slice_idx}",
-                     fontsize=12, fontweight="bold")
+        # cols: raw image + pred overlay + one GradCAM per layer
+        cols = 1 + 1 + n_layers
+        fig, axes = plt.subplots(1, cols,
+                                  figsize=(cols * 4, 4.5))
+        fig.suptitle(f"GradCAM — Slice z={slice_idx}  "
+                     f"[red=high activation | white contour=prediction]",
+                     fontsize=11, fontweight="bold")
+        fig.patch.set_facecolor("black")
 
-        # Image
-        axes[0].imshow(img_np[:, :, slice_idx].T,
-                       cmap="gray", origin="lower", vmin=0, vmax=1)
-        axes[0].set_title("Image", fontsize=10)
+        img_s  = img_np[:, :, slice_idx].T   # (W, H)
+        pred_s = pred_np[:, :, slice_idx].T  # (W, H)
+
+        # ── Col 0: raw image ──────────────────────────────────────────────────
+        axes[0].imshow(img_s, cmap="gray", origin="upper",
+                       vmin=0, vmax=1)
+        axes[0].set_title("Image", color="white", fontsize=10)
         axes[0].axis("off")
 
-        # Prediction overlay
-        axes[1].imshow(img_np[:, :, slice_idx].T,
-                       cmap="gray", origin="lower", vmin=0, vmax=1)
-        axes[1].imshow(pred_np[:, :, slice_idx].T,
-                       cmap="hot", alpha=0.5, origin="lower")
-        n_fg = int((pred_np[:, :, slice_idx] > 0).sum())
-        axes[1].set_title(f"Prediction\n(fg={n_fg}vox)", fontsize=10)
+        # ── Col 1: prediction overlay ─────────────────────────────────────────
+        axes[1].imshow(img_s, cmap="gray", origin="upper",
+                       vmin=0, vmax=1)
+        axes[1].imshow(pred_s, cmap="hot", alpha=0.45,
+                       origin="upper", vmin=0, vmax=1)
+        # White contour around prediction
+        if pred_s.max() > 0:
+            contours = measure.find_contours(pred_s, 0.5)
+            for c in contours:
+                axes[1].plot(c[:, 1], c[:, 0],
+                             color=CONTOUR_COLOR,
+                             linewidth=CONTOUR_WIDTH,
+                             alpha=0.9)
+        n_fg = int((pred_s > 0).sum())
+        axes[1].set_title(f"Prediction\n(fg={n_fg} vox)",
+                          color="white", fontsize=10)
         axes[1].axis("off")
 
-        # GradCAM per layer
+        # ── Cols 2+: GradCAM heatmap per layer ────────────────────────────────
         for k, (layer_name, gc_map) in enumerate(gc_processed.items()):
-            ax  = axes[2 + k]
-            ax.imshow(img_np[:, :, slice_idx].T,
-                      cmap="gray", origin="lower", vmin=0, vmax=1)
-            im = ax.imshow(gc_map[:, :, slice_idx].T,
-                           cmap="jet", alpha=0.6,
-                           origin="lower", vmin=0, vmax=1)
-            parts = layer_name.split(".")
-            label = f"Layer {k+1} ({'.'.join(parts[-2:])})"
-            ax.set_title(label, fontsize=8)
-            ax.axis("off")
-            plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            gc_s     = gc_map[:, :, slice_idx].T  # (W, H)
+            blended  = blend_heatmap(img_s, gc_s, alpha=HEATMAP_ALPHA)
 
-        plt.tight_layout()
-        out_path = os.path.join(output_dir, f"gradcam_z{slice_idx:03d}.png")
-        plt.savefig(out_path, dpi=130, bbox_inches="tight")
+            ax = axes[2 + k]
+            ax.imshow(blended, origin="upper")
+
+            # White prediction contour on top
+            if pred_s.max() > 0:
+                contours = measure.find_contours(pred_s, 0.5)
+                for c in contours:
+                    ax.plot(c[:, 1], c[:, 0],
+                            color=CONTOUR_COLOR,
+                            linewidth=CONTOUR_WIDTH,
+                            linestyle="--",
+                            alpha=0.9)
+
+            parts = layer_name.split(".")
+            label = f"GradCAM — Layer {k+1}\n({'.'.join(parts[-2:])})"
+            ax.set_title(label, color="white", fontsize=9)
+            ax.axis("off")
+
+        plt.tight_layout(pad=0.5)
+        out_path = os.path.join(output_dir,
+                                f"gradcam_z{slice_idx:03d}.png")
+        plt.savefig(out_path, dpi=130, bbox_inches="tight",
+                    facecolor="black")
         plt.close()
         print(f"  Saved -> {out_path}")
 
     # ── MIP summary ────────────────────────────────────────────────────────────
-    fig, axes = plt.subplots(1, cols, figsize=(cols * 4, 4))
+    cols = 1 + 1 + n_layers
+    fig, axes = plt.subplots(1, cols, figsize=(cols * 4, 4.5))
     fig.suptitle("GradCAM — Max Intensity Projection",
-                 fontsize=12, fontweight="bold")
+                 fontsize=11, fontweight="bold")
+    fig.patch.set_facecolor("black")
 
-    axes[0].imshow(img_np.max(axis=2).T, cmap="gray", origin="lower")
-    axes[0].set_title("Image MIP"); axes[0].axis("off")
+    img_mip  = img_np.max(axis=2).T
+    pred_mip = pred_np.max(axis=2).T
 
-    axes[1].imshow(img_np.max(axis=2).T, cmap="gray", origin="lower")
-    axes[1].imshow(pred_np.max(axis=2).T, cmap="hot",
-                   alpha=0.5, origin="lower")
-    axes[1].set_title("Prediction MIP"); axes[1].axis("off")
+    axes[0].imshow(img_mip, cmap="gray", origin="upper")
+    axes[0].set_title("Image MIP", color="white"); axes[0].axis("off")
+
+    axes[1].imshow(img_mip, cmap="gray", origin="upper")
+    axes[1].imshow(pred_mip, cmap="hot", alpha=0.45, origin="upper")
+    if pred_mip.max() > 0:
+        contours = measure.find_contours(pred_mip, 0.5)
+        for c in contours:
+            axes[1].plot(c[:, 1], c[:, 0],
+                         color=CONTOUR_COLOR, linewidth=1.0, alpha=0.8)
+    axes[1].set_title("Prediction MIP", color="white"); axes[1].axis("off")
 
     for k, (layer_name, gc_map) in enumerate(gc_processed.items()):
-        ax = axes[2 + k]
-        ax.imshow(img_np.max(axis=2).T, cmap="gray", origin="lower")
-        ax.imshow(gc_map.max(axis=2).T, cmap="jet",
-                  alpha=0.6, origin="lower", vmin=0, vmax=1)
+        gc_mip   = gc_map.max(axis=2).T
+        blended  = blend_heatmap(img_mip, gc_mip, alpha=HEATMAP_ALPHA)
+        ax       = axes[2 + k]
+        ax.imshow(blended, origin="upper")
+        if pred_mip.max() > 0:
+            contours = measure.find_contours(pred_mip, 0.5)
+            for c in contours:
+                ax.plot(c[:, 1], c[:, 0],
+                        color=CONTOUR_COLOR, linewidth=1.0,
+                        linestyle="--", alpha=0.8)
         parts = layer_name.split(".")
         ax.set_title(f"GradCAM MIP\n({'.'.join(parts[-2:])})",
-                     fontsize=9)
+                     color="white", fontsize=9)
         ax.axis("off")
 
-    plt.tight_layout()
+    plt.tight_layout(pad=0.5)
     out_path = os.path.join(output_dir, "gradcam_mip.png")
-    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.savefig(out_path, dpi=150, bbox_inches="tight",
+                facecolor="black")
     plt.close()
     print(f"MIP saved -> {out_path}")
 
@@ -268,6 +314,19 @@ def main():
     data = transforms({"img": IMAGE_PATH})
     img  = data["img"].unsqueeze(0).to(device)
     print(f"\nImage shape after preprocessing: {img.shape}")
+    print(f"Z depth: {img.shape[4]} slices — use these indices in SPECIFIC_SLICES")
+
+    # Save middle slice preview
+    img_np  = img[0, 0].cpu().numpy()
+    mid     = img_np.shape[2] // 2
+    plt.figure(figsize=(5, 5), facecolor="black")
+    plt.imshow(img_np[:, :, mid].T, cmap="gray", origin="upper")
+    plt.title(f"Middle slice z={mid}", color="white")
+    plt.axis("off")
+    prev_path = os.path.join(OUTPUT_DIR, "preview_middle_slice.png")
+    plt.savefig(prev_path, dpi=100, bbox_inches="tight", facecolor="black")
+    plt.close()
+    print(f"Preview saved -> {prev_path}")
 
     # ── Get prediction ─────────────────────────────────────────────────────────
     model.eval()
@@ -279,29 +338,24 @@ def main():
         )
     pred    = (torch.sigmoid(output) > threshold).float()
     pred_np = pred[0, 0].cpu().numpy()
-    img_np  = img[0, 0].cpu().numpy()
     print(f"Prediction: {pred_np.sum():.0f} foreground voxels")
-    print(f"Volume z-depth: {img_np.shape[2]} slices")
 
-    # ── Compute GradCAM for each layer ─────────────────────────────────────────
+    # ── Compute GradCAM ────────────────────────────────────────────────────────
     gradcam_maps = {}
     for layer_name in TARGET_LAYERS:
         print(f"\nComputing GradCAM: {layer_name}")
         gc_map = run_gradcam_sliding_window(
             model, img, spatial_size,
             target_layer=layer_name,
-            device=device,
-            overlap=0.25,
+            device=device, overlap=0.25,
         )
         if gc_map is not None:
             gradcam_maps[layer_name] = gc_map
             print(f"  shape={gc_map.shape} | "
                   f"range=[{gc_map.min():.3f}, {gc_map.max():.3f}]")
 
-    # Fallback — print available layers if none computed
     if not gradcam_maps:
-        print("\nERROR: No GradCAM maps computed.")
-        print("Available merge/attention layers:")
+        print("\nERROR: No GradCAM maps — available layers:")
         raw = model.module if hasattr(model, "module") else model
         for name, _ in raw.named_modules():
             if "merge" in name or "attention" in name:
@@ -309,7 +363,6 @@ def main():
         return
 
     # ── Visualize ──────────────────────────────────────────────────────────────
-    print(f"\nGenerating plots...")
     visualize_gradcam(
         img_np=img_np,
         pred_np=pred_np,
