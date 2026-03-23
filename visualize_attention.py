@@ -13,7 +13,7 @@ from monai.inferers import sliding_window_inference
 from monai.data import decollate_batch
 
 # ── Config ─────────────────────────────────────────────────────────────────────
-IMAGE_PATH   = "/content/data/your_volume.nii.gz"   # ← your CTA volume
+IMAGE_PATH   = "/content/data/CT.Seq5.Ser7.Img1.nii.gz"   # ← your CTA volume
 CHECKPOINT   = "/content/best_model_phase1b.pth"     # ← your checkpoint
 OUTPUT_DIR   = "/content/attention_maps"
 os.makedirs(OUTPUT_DIR, exist_ok=True)
